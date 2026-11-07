@@ -38,7 +38,7 @@ SECRET=AUTOMATION_APP_PRIVATE_KEY
 FIELDS='{name, target, enforcement, conditions, bypass_actors, rules}'
 
 usage() {
-  sed -n '2,6p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -76,7 +76,7 @@ else
   SOURCE_TYPE=Repository
 fi
 
-CHANGES=0
+CHANGES=0 SECRET_WRITTEN=false
 note_change() {
   CHANGES=$((CHANGES + 1))
 }
@@ -175,7 +175,9 @@ apply_secret() {
     printf '%s\n' "$KEY" | gh secret set "$SECRET" -R "$REPO" >/dev/null
     echo "secret $SECRET: set from --key-file (GitHub can't compare secret values)"
   fi
-  note_change
+  # Not counted as a change: it is rewritten on every --key-file run, so counting it would make
+  # "no changes" unreachable. The summary line reports it separately.
+  SECRET_WRITTEN=true
 }
 
 apply_auto_merge() {
@@ -239,9 +241,13 @@ if [[ -n "$REPO" ]]; then
 fi
 
 if [[ $CHANGES -eq 0 ]]; then
-  echo "== no changes"
+  summary="no changes"
 elif $DRY_RUN; then
-  echo "== $CHANGES change(s) would be made"
+  summary="$CHANGES change(s) would be made"
 else
-  echo "== $CHANGES change(s) made"
+  summary="$CHANGES change(s) made"
 fi
+if $SECRET_WRITTEN; then
+  summary+="; secret $SECRET $($DRY_RUN && echo 'would be ')rewritten"
+fi
+echo "== $summary"

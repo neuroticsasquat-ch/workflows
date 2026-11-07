@@ -46,7 +46,7 @@ The decision record is ADR-0005 in the ops repo
 | File | Ruleset | Targets | Bypass |
 |---|---|---|---|
 | `main.json` | `main` | the default branch: no deletion or force-push, PR merged as a merge commit, `ci` green | none |
-| `integration.json` | `Integration branches — shared rules` | `updates/*`, `release/*`: no force-push, PR (squash or merge), `ci` green | the `ns-automation` app, always |
+| `integration.json` | `Integration branches — shared rules` | `updates/*`, `release/*`: no force-push, PR (squash or merge), `ci` green | the `ns-automation` app (`actor_id` 5661286, its App ID), always |
 | `protect-updates.json` | `Protect updates branches from deletion` | `updates/*`: no deletion | none |
 
 ```sh
@@ -60,8 +60,10 @@ scripts/apply-rulesets.sh --repo tomboone/<name> \
 
 The script is idempotent. It matches rulesets by name, prints a diff before
 each update, and never deletes. Change a ruleset by editing its file and
-re-running the script, not in the GitHub UI. *Grouped security updates* has no
-API, so `--repo` prints the settings link to turn it on by hand.
+re-running the script, not in the GitHub UI. In the bodies, `integration_id`
+15368 is the GitHub Actions app, so only an Actions run can satisfy `ci`.
+*Grouped security updates* has no API, so `--repo` prints the settings link to
+turn it on by hand.
 
 ## This repo's own CI
 
