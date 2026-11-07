@@ -1,0 +1,42 @@
+# This repo's own CI. Every PR and every push to main runs it, and it ends in
+# the aggregate `ci` job, the only check the rulesets require.
+name: self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to a PR cancels its older run; runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # The action is bumped by Dependabot; the actionlint binary it installs
+      # is pinned here and bumped by hand.
+      - uses: raven-actions/actionlint@v2.2.0
+        with:
+          version: 1.7.12
+
+  ci:
+    if: always()
+    needs: [actionlint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every needed job succeeded
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo "needs: ${NEEDS}"
+          exit 1
+        env:
+          NEEDS: ${{ toJSON(needs) }}

@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keeps the actions used inside the shared workflows current. This is the one
+  # place they are bumped; callers float on @v1 and ignore this repo.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: updates/dependencies
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "09:00"
+      timezone: America/New_York
+    commit-message:
+      prefix: ci
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
