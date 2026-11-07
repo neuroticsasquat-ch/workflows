@@ -28,9 +28,24 @@ jobs:
         with:
           version: 1.7.12
 
+  # The scripts and ruleset bodies. shellcheck and jq come preinstalled on the runner.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck --version && shellcheck scripts/*.sh
+      - name: Ruleset bodies are valid JSON
+        run: |
+          for file in rulesets/*.json; do
+            jq -e . "$file" >/dev/null || { echo "::error file=$file::not valid JSON"; exit 1; }
+          done
+
   ci:
     if: always()
-    needs: [actionlint]
+    needs: [actionlint, scripts]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
