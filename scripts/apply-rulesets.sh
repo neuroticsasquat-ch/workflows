@@ -36,6 +36,11 @@ SECRET=AUTOMATION_APP_PRIVATE_KEY
 
 # The fields a ruleset GET returns that this script manages, so a GET can be compared with a body.
 FIELDS='{name, target, enforcement, conditions, bypass_actors, rules}'
+# Applied to both sides before comparing. GitHub returns a disabled dismissal_restriction on some
+# rulesets (tvbf-backend's) and omits it on others (every ruleset created in 2026-11), so the
+# default is dropped from both and either shape compares equal.
+NORMALIZE='.rules |= map(if .parameters.dismissal_restriction.enabled == false
+  then del(.parameters.dismissal_restriction) else . end)'
 
 usage() {
   sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
@@ -77,6 +82,12 @@ else
 fi
 
 CHANGES=0 SECRET_WRITTEN=false
+# Set with `if`, never inline as $($DRY_RUN && echo …): on a real run that substitution fails,
+# an assignment takes its status, and set -e then ends the script.
+DRY_RUN_NOTE="" WOULD_BE=""
+if $DRY_RUN; then
+  DRY_RUN_NOTE=", dry run" WOULD_BE="would be "
+fi
 note_change() {
   CHANGES=$((CHANGES + 1))
 }
@@ -95,7 +106,7 @@ body_for() {
 }
 
 apply_ruleset() {
-  local body="$1" name id current
+  local body="$1" name id current wanted
   name=$(jq -r .name <<<"$body")
   if $DRY_RUN; then
     echo "--- ruleset '$name' ($SOURCE_TYPE) body:"
@@ -119,15 +130,16 @@ apply_ruleset() {
     return
   fi
 
-  current=$(gh api "$API/$id" | jq -S "$FIELDS")
-  if [[ "$current" == "$(jq -S . <<<"$body")" ]]; then
+  current=$(gh api "$API/$id" | jq -S "$FIELDS | $NORMALIZE")
+  wanted=$(jq -S "$NORMALIZE" <<<"$body")
+  if [[ "$current" == "$wanted" ]]; then
     echo "ruleset '$name': unchanged"
     return
   fi
 
   echo "ruleset '$name': differs from rulesets/:"
   diff -u --label "github ($id)" --label "rulesets/" \
-    <(echo "$current") <(jq -S . <<<"$body") || true
+    <(echo "$current") <(echo "$wanted") || true
   if $DRY_RUN; then
     echo "ruleset '$name': would be updated"
   else
@@ -223,10 +235,10 @@ apply_security_updates() {
 }
 
 if [[ -n "$ORG" ]]; then
-  echo "== org $ORG (repos with $PROPERTY = true)$($DRY_RUN && echo ', dry run')"
+  echo "== org $ORG (repos with $PROPERTY = true)$DRY_RUN_NOTE"
   check_property
 else
-  echo "== repo $REPO$($DRY_RUN && echo ', dry run')"
+  echo "== repo $REPO$DRY_RUN_NOTE"
   if [[ -n "$KEY_FILE" ]]; then read_key; fi
 fi
 
@@ -248,6 +260,6 @@ else
   summary="$CHANGES change(s) made"
 fi
 if $SECRET_WRITTEN; then
-  summary+="; secret $SECRET $($DRY_RUN && echo 'would be ')rewritten"
+  summary+="; secret $SECRET ${WOULD_BE}rewritten"
 fi
 echo "== $summary"
