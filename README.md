@@ -234,8 +234,9 @@ The caller runs it as a `publish` job in the same workflow as `ci`:
 jobs:
   # ... python, image (image-check.yml), ci ...
   publish:
-    if: github.event_name == 'push'   # push to main only; never on a PR
-    needs: ci                         # a red ci skips publish
+    # Push to main only, never on a PR, and only when ci itself succeeded.
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.ci.result == 'success' }}
+    needs: ci
     concurrency: { group: "publish-${{ github.ref }}", cancel-in-progress: false }
     permissions: { contents: read, packages: write }
     uses: neuroticsasquat-ch/workflows/.github/workflows/image-publish.yml@v1
@@ -243,8 +244,13 @@ jobs:
       image: ghcr.io/tomboone/mlb-today
 ```
 
-- `needs: ci` without `if: always()` is what holds a publish back: when `ci`
-  fails, `publish` is skipped.
+- `needs.ci.result == 'success'` is what holds a publish back: a red or
+  cancelled `ci` skips `publish`. Test it explicitly. A condition without a
+  status function gets an implicit `success()`, and for a job that is false
+  when *any* job upstream of `ci` was skipped, such as a path-filtered job or
+  self-test's `gate-input-skipped`. So `if: github.event_name == 'push'`
+  alone never publishes from a repo with a skipped job. `!cancelled()`
+  replaces the implicit `success()`.
 - The job-level `concurrency` runs publishes one at a time and never cancels a
   running one. It does not keep push order: publishes start as each commit's
   `ci` finishes. The tip check covers that. A commit that is no longer the
