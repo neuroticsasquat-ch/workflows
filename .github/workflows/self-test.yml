@@ -64,6 +64,16 @@ jobs:
       working-directory: fixtures/python-postgres-alembic
       postgres: "17"
 
+  js-no-typecheck:
+    uses: ./.github/workflows/js.yml
+    with:
+      working-directory: fixtures/js-no-typecheck
+
+  js-lint-and-test:
+    uses: ./.github/workflows/js.yml
+    with:
+      working-directory: fixtures/js-lint-and-test
+
   js-pnpm:
     uses: ./.github/workflows/js.yml
     with:
