@@ -329,6 +329,9 @@ out `updates/dependencies` with full history using it. It checks out
 
    Major bumps are read from the `updated-dependencies:` metadata block in
    Dependabot's commit messages, the one `dependabot/fetch-metadata` parses.
+   Security updates leave `update-type` out of that block, so for an entry
+   without one the message's `from A to B` decides: a change in the leading
+   version number is a major, and versions it can't find or read count as one.
    A held PR's body ends in the reasons, plus a marker the digest reads. A
    promoting run merges the PR and leaves its body alone.
 

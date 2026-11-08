@@ -22,7 +22,8 @@
 #    gets one comment per <base> commit, with the steps to resolve the conflict.
 # 4. Promote: the promotion PR is merged (merge commit) when no guard holds. Every guard that
 #    fails is recorded, in this order: opted-out (no --auto-promote), conflict, major (a Dependabot
-#    commit in <base>..HEAD bumps a major, or has no update metadata), ci-red, unsettled (an open
+#    commit in <base>..HEAD bumps a major, or has no update metadata; an entry without update-type,
+#    as on security updates, is judged by the message's "from A to B"), ci-red, unsettled (an open
 #    Dependabot PR into <branch> whose `ci` isn't red), ci-pending (`ci` unfinished, or the PR head
 #    isn't HEAD), outside-window (left out when opted-out). The PR body carries the reasons as
 #    `<!-- dependency-branch:hold <reason>... -->` for the digest.
@@ -69,14 +70,39 @@ JQ_DEFS='
     ([.statusCheckRollup[]? | select((.name // .context) == "ci")] | last)
     | if . == null then "PENDING"
       else ((.conclusion // "") as $c | if $c != "" then $c else (.state // "PENDING") end) end;
-  # Why a Dependabot commit message makes the batch major, or empty when it does not. Missing or
-  # incomplete update metadata counts as major.
+  # The versions a Dependabot commit message says <name> went from and to: "Bumps [name](url)
+  # from A to B", "Updates `name` from A to B" (grouped) or "bump name from A to B" (the subject).
+  def version_change($name):
+    ($name | gsub("(?<c>[.*+?^${}()|\\[\\]\\\\])"; "\\\(.c)")) as $esc
+    | [match("(?:^|[\\s\\[`])" + $esc + "(?:\\]\\([^)]*\\)|`)? from (?<from>\\S+) to (?<to>\\S+)")] | first
+    | if . == null then null
+      else (.captures | map({(.name): .string}) | add)
+        | {from: (.from | ltrimstr("v")), to: (.to | rtrimstr(".") | ltrimstr("v"))} end;
+  # Why a Dependabot commit message makes the batch major, or empty when it does not. The
+  # update-type of each entry decides. Security updates carry none, so then the leading version
+  # numbers in the message decide. Missing or unreadable metadata or versions count as major.
   def major_reason:
-    if test("(^|\n)updated-dependencies:") | not then "no updated-dependencies metadata"
-    elif ([scan("(^|\n)[ \t-]*update-type:")] | length)
-      < ([scan("(^|\n)[ \t-]*dependency-name:")] | length) then "an update without update-type"
-    elif test("update-type: version-update:semver-major") then "semver-major"
-    else empty end;
+    . as $msg
+    | if test("(^|\\n)updated-dependencies:") | not then "no updated-dependencies metadata"
+      else
+        [$msg | split("\n- dependency-name: ") | .[1:][]] as $entries
+        | if ($entries | length) == 0 then "no dependencies in the updated-dependencies metadata"
+          else
+            [$entries[]
+              | (split("\n")[0] | gsub("^\\s+|\\s+$"; "")) as $name
+              | sub("\\n\\.\\.\\.(\\n[\\s\\S]*)?$"; "") as $entry
+              | if ($entry | test("update-type: version-update:semver-major")) then "\($name): semver-major"
+                elif ($entry | test("update-type:")) then empty
+                else ($msg | version_change($name)) as $v
+                  | if $v == null then "\($name): no update-type, and no from/to versions in the message"
+                    else ([$v.from, $v.to] | map([capture("^(?<m>[0-9]+)")] | first.m)) as $m
+                      | if $m[0] == null or $m[1] == null or $m[0] != $m[1]
+                        then "\($name): no update-type, and \($v.from) to \($v.to) is a major" else empty end
+                    end
+                end]
+            | if length == 0 then empty else join("; ") end
+          end
+      end;
 '
 
 usage() {

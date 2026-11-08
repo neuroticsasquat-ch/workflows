@@ -85,15 +85,26 @@ commit_on_main() {
   git push --quiet origin main
 }
 
-# dependabot_message <dependency> <update-type>: a Dependabot commit message, with the update
-# metadata block dependabot/fetch-metadata parses. An update type of `none` leaves the block out.
+# dependabot_message <dependency> <update-type> [<from> <to>]: a Dependabot commit message, with the
+# update metadata block dependabot/fetch-metadata parses. An update type of `none` leaves the block
+# out; `missing` leaves out its update-type line, as on security updates; `garbled` also drops the
+# versions from the prose.
 dependabot_message() {
-  echo "build(deps): bump $1 from 1.0.0 to 2.0.0"
+  local from=${3:-1.0.0} to=${4:-2.0.0}
+  echo "build(deps): bump $1 from $from to $to"
   echo
-  echo "Bumps $1 from 1.0.0 to 2.0.0."
-  if [[ $2 != none ]]; then
-    printf '\n---\nupdated-dependencies:\n- dependency-name: %s\n  dependency-version: 2.0.0\n  dependency-type: direct:production\n  update-type: %s\n...\n' "$1" "$2"
+  if [[ $2 == garbled ]]; then
+    echo "Bumps $1."
+  else
+    echo "Bumps [$1](https://example.com/$1) from $from to $to."
   fi
+  case $2 in
+    none) ;;
+    missing | garbled)
+      printf '\n---\nupdated-dependencies:\n- dependency-name: %s\n  dependency-version: %s\n  dependency-type: direct:production\n...\n' "$1" "$to" ;;
+    *)
+      printf '\n---\nupdated-dependencies:\n- dependency-name: %s\n  dependency-version: %s\n  dependency-type: direct:production\n  update-type: %s\n...\n' "$1" "$to" "$2" ;;
+  esac
   echo
   echo "Signed-off-by: dependabot[bot] <support@github.com>"
 }
@@ -350,6 +361,19 @@ promotion_pr "$TIP" SUCCESS CLEAN
 run_script --dry-run --auto-promote --now "$INSIDE"
 expect_promotion "promote 30" "(dry run)"
 
+# An entry without update-type is judged by the message's versions: 1.0.0 to 1.1.0 is not a major.
+new_case promote-missing-update-type
+TIP=$(git switch --quiet -c dependabot/x "origin/$BRANCH" && echo v2 >x.txt && git add x.txt &&
+  git commit --quiet --author 'dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>' \
+    -m "$(dependabot_message x.txt missing 1.0.0 1.1.0)" &&
+  git switch --quiet -C deps "origin/$BRANCH" && git merge --quiet --no-ff -m "Merge x" dependabot/x &&
+  git push --quiet origin "HEAD:refs/heads/$BRANCH" && git rev-parse HEAD)
+echo '[{"number": 25, "author": {"login": "app/dependabot"}, "autoMergeRequest": null, "mergeStateStatus": "BLOCKED",
+  "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": "FAILURE"}]}]' >"$CASE/gh/open.json"
+promotion_pr "$TIP" SUCCESS CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "promote 30" "(dry run)"
+
 # Without --auto-promote nothing is merged, and the window isn't recorded.
 promotion_case opted-out
 run_script --dry-run --now "$FRIDAY"
@@ -436,10 +460,10 @@ expect_promotion "hold 30 outside-window" "(dry run, 09:30 EST)"
 
 # --- 5. Security updates ---------------------------------------------------------
 
-# security_pr <number> <ci conclusion> <update-type> [<author>]: an open PR into main.
+# security_pr <number> <ci conclusion> <update-type> [<author> [<from> <to>]]: an open PR into main.
 security_pr() {
   jq -n --argjson number "$1" --arg ci "$2" --arg author "${4:-app/dependabot}" \
-    --arg body "$(dependabot_message "dep$1" "$3" | sed 1,2d)" '{
+    --arg body "$(dependabot_message "dep$1" "$3" "${5:-}" "${6:-}" | sed 1,2d)" '{
     "number": $number, "author": {"login": $author},
     "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": $ci}],
     "commits": [{"oid": "abcdef1234567890", "authors": [{"name": "dependabot[bot]", "login": "dependabot[bot]"}],
@@ -455,6 +479,10 @@ echo '[]' >"$CASE/gh/open.json"
   security_pr 41 SUCCESS version-update:semver-major
   security_pr 42 SUCCESS version-update:semver-minor tomboone
   security_pr 43 "" version-update:semver-minor
+  # Security updates carry no update-type: the versions in the message decide.
+  security_pr 45 SUCCESS missing app/dependabot 4.17.20 4.18.1
+  security_pr 46 SUCCESS missing app/dependabot 4.17.20 5.0.0
+  security_pr 47 SUCCESS garbled
 } | jq -s . >"$CASE/gh/security.json"
 before=$(remote_branch)
 run_script --dry-run --auto-promote --now "$INSIDE"
@@ -463,7 +491,10 @@ promotion-pr none
 security-merge 40
 security-hold 41 major
 security-hold 43 ci-pending
-security-hold 44 ci-red" "(dry run)"
+security-hold 44 ci-red
+security-merge 45
+security-hold 46 major
+security-hold 47 major" "(dry run)"
 expect_dry_run_wrote_nothing "$before"
 run_script --dry-run --auto-promote --now "$FRIDAY"
 expect_actions "sync none
@@ -471,14 +502,20 @@ promotion-pr none
 security-hold 40 outside-window
 security-hold 41 major outside-window
 security-hold 43 ci-pending outside-window
-security-hold 44 ci-red outside-window" "(dry run, outside the window)"
+security-hold 44 ci-red outside-window
+security-hold 45 outside-window
+security-hold 46 major outside-window
+security-hold 47 major outside-window" "(dry run, outside the window)"
 run_script --now "$INSIDE"
 expect_actions "sync none
 promotion-pr none
 security-hold 40 opted-out
 security-hold 41 opted-out major
 security-hold 43 opted-out ci-pending
-security-hold 44 opted-out ci-red" "(real run, opted out)"
+security-hold 44 opted-out ci-red
+security-hold 45 opted-out
+security-hold 46 opted-out major
+security-hold 47 opted-out major" "(real run, opted out)"
 if [[ -s $CASE/gh/writes.log ]]; then
   fail "security: the opted-out run made gh writes:"$'\n'"$(cat "$CASE/gh/writes.log")"
 fi
@@ -488,9 +525,18 @@ promotion-pr none
 security-merge 40
 security-hold 41 major
 security-hold 43 ci-pending
-security-hold 44 ci-red" "(real run)"
+security-hold 44 ci-red
+security-merge 45
+security-hold 46 major
+security-hold 47 major" "(real run)"
 expect_write "pr merge --merge 40"
 expect_no_write "pr merge --merge 41"
+expect_write "pr merge --merge 45"
+expect_no_write "pr merge --merge 46"
+if [[ $LOG != *"dep46: no update-type, and 4.17.20 to 5.0.0 is a major"* ||
+  $LOG != *"dep47: no update-type, and no from/to versions in the message"* ]]; then
+  fail "security: the log doesn't say why #46 and #47 are major:"$'\n'"$LOG"
+fi
 
 # --- A malformed window or --now fails the run -----------------------------------
 
