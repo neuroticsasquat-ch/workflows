@@ -200,6 +200,68 @@ The repo contract:
 - A repo with several images calls the workflow from a `strategy.matrix`, one
   `name` per image.
 
+## `image-publish.yml`
+
+Pushes a repo's image to GHCR as `sha-<7>` (the commit's short SHA) and as
+`latest`, with no other tags. It replaces each repo's separate `image.yml`, and
+runs from the CI caller only after `ci` passed on that commit, so a red commit
+never becomes `latest`. The checks are `image-check.yml`'s, already run in
+`ci`; this workflow only builds and pushes.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `image` | required | The image without a tag, such as `ghcr.io/tomboone/mlb-today`. Must be on `ghcr.io`, under the calling repo's owner: `GITHUB_TOKEN` can't push anywhere else. |
+| `name` | repo name | The GHA cache scope, shared with `image-check.yml`. Lowercased. Pass the same `name` as the image-check call. |
+| `context` | `.` | Build context. |
+| `file` | `<context>/Dockerfile` | Dockerfile path, such as `Dockerfile.prod`. |
+| `target` | `""` | Stage to build; empty means the last stage. |
+| `platforms` | `linux/amd64` | Comma-separated platforms. QEMU is set up when any of them is not `linux/amd64`. |
+| `build-args` | `""` | Multiline `KEY=value`. |
+
+Steps, in order: checkout; a check that `image` is a `ghcr.io` image without
+a tag, and the cache scope resolved; a check that the commit is still the tip
+of `github.ref`; `docker/setup-qemu-action`, only when `platforms` needs it;
+`docker/setup-buildx-action`; `docker/login-action` to `ghcr.io` as
+`github.actor` with `GITHUB_TOKEN`; `docker/metadata-action` with
+`flavor: latest=false` and the tags `type=raw,value=latest` (enabled only when
+the commit is the tip) and `type=sha,prefix=sha-,format=short`;
+`docker/build-push-action` with `push: true` and the cache
+`type=gha,scope=<name>` (`mode=max`).
+
+The caller runs it as a `publish` job in the same workflow as `ci`:
+
+```yaml
+jobs:
+  # ... python, image (image-check.yml), ci ...
+  publish:
+    if: github.event_name == 'push'   # push to main only; never on a PR
+    needs: ci                         # a red ci skips publish
+    concurrency: { group: "publish-${{ github.ref }}", cancel-in-progress: false }
+    permissions: { contents: read, packages: write }
+    uses: neuroticsasquat-ch/workflows/.github/workflows/image-publish.yml@v1
+    with:
+      image: ghcr.io/tomboone/mlb-today
+```
+
+- `needs: ci` without `if: always()` is what holds a publish back: when `ci`
+  fails, `publish` is skipped.
+- The job-level `concurrency` runs publishes one at a time and never cancels a
+  running one. It does not keep push order: publishes start as each commit's
+  `ci` finishes. The tip check covers that. A commit that is no longer the
+  branch tip when its publish runs gets its `sha-` tag but leaves `latest`
+  alone, so `latest` never regresses to an older commit. The check depends on
+  the concurrency group, so keep it.
+- A concurrency group holds one running and one pending run. When a third
+  publish queues, GitHub cancels the pending one, so that commit gets no
+  `sha-` tag. That takes three merges within one publish's runtime, and
+  `latest` still lands on the newest.
+- `latest` can lag. If a newer commit's `ci` fails, the green commit before it
+  was no longer the tip when it published, so `latest` stays where it was
+  until the next green commit.
+- The caller grants `packages: write`. Without it the run fails at startup.
+- Deploy steps after the publish (Azure, Tofu) stay caller jobs that need
+  `publish`.
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
@@ -215,6 +277,7 @@ reusable workflow has a job there that calls it by local path
 | `js-pnpm` | `fixtures/js-pnpm` | pnpm and Node from `packageManager` and `.node-version`; oxlint, `tsc -b`, vitest, `vite build` |
 | `image-docker` | `fixtures/docker` | the last stage, which runs as a non-root user; `build-args`; `.github/ci/smoke.sh` runs the image's CLI |
 | `image-docker-allow-root` | `fixtures/docker` | an explicit `file`, `target: runtime-root` (no `USER` line), `allow-root: true` |
+| `publish` | `fixtures/docker` | `image-publish.yml`, called the way a caller calls it (after `ci`, push to `main` only), pushing `ghcr.io/neuroticsasquat-ch/workflows-fixture` |
 
 A job that calls a reusable workflow can't take `continue-on-error`, so the
 failing cases (a root image without `allow-root`, a smoke script that exits 1)
@@ -222,8 +285,10 @@ aren't in the harness. They are checked on a throwaway PR when the workflow
 changes.
 
 The harness also holds the gate self-test, which checks `actions/gate` on
-success, skipped, failed and cancelled jobs. Everything ends in a job named
-`ci`, decided by `./actions/gate`, the only required check.
+success, skipped, failed and cancelled jobs. Every job except `publish` ends
+in a job named `ci`, decided by `./actions/gate`, the only required check.
+`publish` needs `ci`, so it can't also be in `ci`'s needs. It runs only on push
+to `main`, so a PR never publishes, and a red `ci` skips it.
 
 The actions used inside the workflows are pinned to exact versions. Dependabot
 bumps them weekly into `updates/dependencies`.
