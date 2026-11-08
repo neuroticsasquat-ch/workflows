@@ -1,0 +1,17 @@
+# The backend half of the mixed fixture. self-test.yml calls python.yml on it
+# only when the `changes` job reports a backend change.
+[project]
+name = "mixed-backend"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = ["pyright>=1.1.414", "pytest>=9.2.0", "ruff>=0.17.4"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

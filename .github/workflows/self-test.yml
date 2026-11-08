@@ -111,6 +111,65 @@ jobs:
       build-args: FIXTURE_VERSION=1.2.3
       allow-root: true
 
+  # --- Mixed repo -----------------------------------------------------------
+  # The README's mixed-repo caller (closinglineup, fundlens), with this repo's
+  # paths: Python in backend/, pnpm in frontend/, each gated on a path filter,
+  # plus one extra check, all in `ci`'s needs. A frontend-only change skips
+  # mixed-python, and `ci` must still pass. Each filter also matches the
+  # workflow it calls and this file, so changing either still runs the job.
+  # Credentials needn't persist for paths-filter's git fetch: the repo is public.
+
+  mixed-changes:
+    runs-on: ubuntu-latest
+    # paths-filter lists a PR's files through the API; on a push it diffs with git.
+    permissions: { contents: read, pull-requests: read }
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - id: filter
+        uses: dorny/paths-filter@v4.0.3
+        with:
+          filters: |
+            backend:
+              - fixtures/mixed/backend/**
+              - .github/workflows/python.yml
+              - .github/workflows/self-test.yml
+            frontend:
+              - fixtures/mixed/frontend/**
+              - .github/workflows/js.yml
+              - .github/workflows/self-test.yml
+
+  mixed-python:
+    needs: mixed-changes
+    if: needs.mixed-changes.outputs.backend == 'true'
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/mixed/backend
+
+  mixed-js:
+    needs: mixed-changes
+    if: needs.mixed-changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/js.yml
+    with:
+      working-directory: fixtures/mixed/frontend
+
+  # The extra check, standing in for closinglineup's types drift: the
+  # frontend's copy of the API schema matches what the backend renders.
+  mixed-drift:
+    needs: mixed-changes
+    if: needs.mixed-changes.outputs.backend == 'true' || needs.mixed-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: frontend/src/schema.json matches the backend
+        run: python3 fixtures/mixed/backend/schema.py | diff -u fixtures/mixed/frontend/src/schema.json -
+
   # The gate self-test: `ci` sees one job that succeeded and one that was
   # skipped, and must pass.
 
@@ -182,6 +241,10 @@ jobs:
       - js-pnpm
       - image-docker
       - image-docker-allow-root
+      - mixed-changes
+      - mixed-python
+      - mixed-js
+      - mixed-drift
       - gate-input-success
       - gate-input-skipped
       - gate-cases
