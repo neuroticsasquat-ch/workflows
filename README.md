@@ -214,7 +214,7 @@ reusable workflow has a job there that calls it by local path
 | `python-postgres-alembic` | `fixtures/python-postgres-alembic` | `postgres: "17"`, `.github/ci/env` and `setup.sh`, the Alembic checks |
 | `js-pnpm` | `fixtures/js-pnpm` | pnpm and Node from `packageManager` and `.node-version`; oxlint, `tsc -b`, vitest, `vite build` |
 | `image-docker` | `fixtures/docker` | the last stage, which runs as a non-root user; `build-args`; `.github/ci/smoke.sh` runs the image's CLI |
-| `image-docker-allow-root` | `fixtures/docker` | `file`, `target: runtime-root` (no `USER` line), `allow-root: true` |
+| `image-docker-allow-root` | `fixtures/docker` | an explicit `file`, `target: runtime-root` (no `USER` line), `allow-root: true` |
 
 A job that calls a reusable workflow can't take `continue-on-error`, so the
 failing cases (a root image without `allow-root`, a smoke script that exits 1)
