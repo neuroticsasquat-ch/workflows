@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for test.sh. Takes the call digest.sh post makes (-o <file> -w <format>
+# --data-binary <payload> <url>), appends the payload to $FAKE_CURL_DIR/posts.log, one per line,
+# and answers 200. If $FAKE_CURL_DIR/429 exists, the call answers 429 instead and removes it, so
+# the next call succeeds. $FAKE_CURL_DIR/status, if it exists, holds the status every call answers.
+set -euo pipefail
+
+dir=${FAKE_CURL_DIR:?FAKE_CURL_DIR is not set}
+out='' payload='' url=''
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -o) out=$2; shift 2 ;;
+    -w | -H) shift 2 ;;
+    --data-binary) payload=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+echo "$url" >>"$dir/urls.log"
+if [[ -f $dir/429 ]]; then
+  rm "$dir/429"
+  echo '{"message": "You are being rate limited.", "retry_after": 0.2, "global": false}' >"$out"
+  printf 429
+elif [[ -f $dir/status ]]; then
+  echo '{"message": "Invalid Form Body"}' >"$out"
+  printf '%s' "$(cat "$dir/status")"
+else
+  echo "$payload" >>"$dir/posts.log"
+  echo '{"id": "1"}' >"$out"
+  printf 200
+fi

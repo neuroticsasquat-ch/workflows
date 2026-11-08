@@ -1,0 +1,98 @@
+# The Saturday dependency digest: one Discord message in #dependencies, after the
+# promotion window closes, saying for every repo that calls dependency-branch.yml
+# what was promoted today, what is held and why, which Dependabot PRs are red and
+# which security updates are open. Repos with nothing to report are counted.
+#
+# It runs here on a schedule, not as a reusable workflow, and it only reads. It
+# acts as the automation app (ops ADR-0007) to see both owners' repos. The steps
+# are scripts/digest.sh.
+name: digest
+
+on:
+  schedule:
+    # 18:30 America/New_York is 22:30 UTC in EDT and 23:30 UTC in EST. Both crons
+    # run every Saturday, and the zone check below lets only the one that is
+    # 18:30 in New York post.
+    - cron: "30 22 * * 6"
+    - cron: "30 23 * * 6"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Write the digest to the run summary without posting it to Discord.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: digest
+  cancel-in-progress: false
+
+env:
+  # The automation app's client ID. Public.
+  APP_CLIENT_ID: Iv23li9H17twmhg3CZou
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      # A run by hand always posts. A scheduled one posts only when its cron was
+      # due at 18:30 Saturday in New York.
+      - id: due
+        name: Is it 18:30 on Saturday in New York?
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          due=true
+          if [[ -n $SCHEDULE ]]; then due=$(scripts/digest.sh due --schedule "$SCHEDULE"); fi
+          echo "due=$due" >>"$GITHUB_OUTPUT"
+
+      # One token per installation, each covering every repo the app is installed on there.
+      - id: ns
+        if: steps.due.outputs.due == 'true'
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          owner: neuroticsasquat-ch
+
+      - id: tb
+        if: steps.due.outputs.due == 'true'
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          owner: tomboone
+
+      - name: Collect each repo's promotion, holds, red and security PRs
+        if: steps.due.outputs.due == 'true'
+        env:
+          NS_TOKEN: ${{ steps.ns.outputs.token }}
+          TB_TOKEN: ${{ steps.tb.outputs.token }}
+        run: |
+          GH_TOKEN=$NS_TOKEN scripts/digest.sh collect >"$RUNNER_TEMP/neuroticsasquat-ch.json"
+          GH_TOKEN=$TB_TOKEN scripts/digest.sh collect >"$RUNNER_TEMP/tomboone.json"
+
+      - name: Render the digest
+        if: steps.due.outputs.due == 'true'
+        run: |
+          scripts/digest.sh render "$RUNNER_TEMP/neuroticsasquat-ch.json" "$RUNNER_TEMP/tomboone.json" \
+            >"$RUNNER_TEMP/payloads.jsonl"
+          jq -r '.embeds[] | (.title // empty | "## \(.)"), (.description | split("\n")[] | "- \(.)")' \
+            "$RUNNER_TEMP/payloads.jsonl" \
+            >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Post it to #dependencies
+        if: steps.due.outputs.due == 'true' && !inputs.dry-run
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_DEPENDENCIES_WEBHOOK }}
+        run: scripts/digest.sh post <"$RUNNER_TEMP/payloads.jsonl"
