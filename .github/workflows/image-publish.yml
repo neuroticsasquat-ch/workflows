@@ -1,0 +1,144 @@
+# Publish a repo's image to GHCR as `sha-<7>`, and as `latest` while the commit
+# is still the branch tip. The caller runs it only on push to main, after `ci`
+# passed on that commit, grants `packages: write`, and serialises it with
+# job-level concurrency. The checks
+# (non-root, smoke test) are image-check.yml's job and already ran in `ci`.
+# The inputs and the caller pattern are in the README.
+name: image-publish
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The image to push, without a tag, such as ghcr.io/tomboone/mlb-today.
+        type: string
+        required: true
+      name:
+        description: The GHA cache scope, shared with image-check.yml. Empty means the repo name.
+        type: string
+        default: ""
+      context:
+        description: Build context.
+        type: string
+        default: "."
+      file:
+        description: Dockerfile path. Empty means <context>/Dockerfile.
+        type: string
+        default: ""
+      target:
+        description: Stage to build. Empty means the last stage.
+        type: string
+        default: ""
+      platforms:
+        description: >-
+          Comma-separated platforms to build for. QEMU is set up when any of
+          them is not linux/amd64.
+        type: string
+        default: linux/amd64
+      build-args:
+        description: Multiline KEY=value build args.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the cache scope and platforms
+        id: resolve
+        env:
+          IMAGE: ${{ inputs.image }}
+          NAME: ${{ inputs.name || github.event.repository.name }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          # The login below is to ghcr.io only, so any other registry would
+          # fail at push time with a less helpful error.
+          if [[ $IMAGE != ghcr.io/* || $IMAGE == *:* ]]; then
+            echo "::error title=image-publish::image must be a ghcr.io image without a tag, such as ghcr.io/tomboone/mlb-today; got '$IMAGE'."
+            exit 1
+          fi
+          # Docker repository names are lowercase.
+          scope=${NAME,,}
+          qemu=false
+          IFS=, read -ra platforms <<< "$PLATFORMS"
+          for platform in "${platforms[@]}"; do
+            platform=${platform//[[:space:]]/}
+            if [[ -n $platform && $platform != linux/amd64 ]]; then
+              qemu=true
+            fi
+          done
+          echo "Publishing $IMAGE for $PLATFORMS, cache scope $scope, QEMU $qemu"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "qemu=$qemu" >> "$GITHUB_OUTPUT"
+
+      # The caller's concurrency group runs publishes one at a time, but in the
+      # order their `ci` runs finish, not push order. So an older commit can
+      # publish after a newer one. It still gets its sha- tag, but `latest`
+      # only moves while this commit is the ref's tip. The check is safe
+      # because nothing else in the group publishes between it and the push.
+      - name: Is this commit still the tip of the ref?
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          tip=$(gh api "repos/$REPO/git/ref/${REF#refs/}" --jq .object.sha)
+          if [[ $tip == "$SHA" ]]; then
+            echo "$SHA is the tip of $REF: tagging latest"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=image-publish::$REF has moved on to $tip since $SHA, so this run pushes only sha-${SHA::7} and leaves latest to the newer commit's publish."
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.resolve.outputs.qemu == 'true'
+        uses: docker/setup-qemu-action@v4.4.0
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # latest (while this commit is the tip) and sha-<7>, nothing else: no
+      # branch, PR or semver tags.
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: 7
+        with:
+          images: ${{ inputs.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ steps.tip.outputs.latest }}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file || format('{0}/Dockerfile', inputs.context) }}
+          target: ${{ inputs.target }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ inputs.build-args }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.resolve.outputs.scope }}
+          cache-to: type=gha,scope=${{ steps.resolve.outputs.scope }},mode=max
