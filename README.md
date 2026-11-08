@@ -272,8 +272,10 @@ jobs:
 
 Keeps a repo's dependency branch, `updates/dependencies`, current with
 `main`, auto-merges Dependabot PRs into it, and keeps the promotion PR from it
-to `main` open. It replaces `merge-main-into-dependencies.yml`, the weekly PR
-that merged `main` back in, and the hand-merging of Dependabot PRs.
+to `main` open. With `auto-promote`, it also merges that PR and Dependabot
+security updates inside the window. It replaces
+`merge-main-into-dependencies.yml`, the weekly PR that merged `main` back in,
+and the hand-merging of Dependabot PRs.
 
 It acts as the automation app (ADR-0007 in the ops repo), not `GITHUB_TOKEN`.
 The app is the only bypass actor on the integration ruleset, so its sync push
@@ -283,8 +285,8 @@ and a green `ci` from the app like anyone else.
 
 | Input / secret | Default | Meaning |
 |---|---|---|
-| `auto-promote` | `false` | Merge the promotion PR when the guards hold. Accepted, not yet acted on (NEU-2229). Every adopter except fundlens passes `true`. |
-| `window` | `Sat 10:00-18:00 America/New_York` | The promotion window for `auto-promote` (NEU-2229). |
+| `auto-promote` | `false` | Merge the promotion PR, and green security updates, when the guards hold (steps 4 and 5). Off, nothing is ever merged into `main`. Every adopter except fundlens passes `true`. |
+| `window` | `Sat 10:00-18:00 America/New_York` | When `auto-promote` may merge: `<Day> <HH:MM>-<HH:MM> <IANA zone>`, evaluated in that zone (DST included), start inclusive, end exclusive, within one day (so the latest end is `23:59`). A malformed window or unknown zone fails the run. |
 | `app-client-id` | the app's client ID | Public, so it's the default. |
 | secret `app-private-key` | required | The app's private key, from `AUTOMATION_APP_PRIVATE_KEY`. Pass it explicitly: `secrets: inherit` doesn't cross owners. |
 
@@ -311,12 +313,42 @@ out `updates/dependencies` with full history using it. It checks out
    conflicting sync, the PR gets a comment with the steps to resolve the
    conflict through a PR of your own. The comment is posted once for each
    `main` commit, not on every run.
+4. **Promote.** The promotion PR is merged (merge commit) as the app only when
+   no guard holds. Otherwise it stays open, and every failing guard is
+   recorded, in this order:
 
-The action list goes to the step summary. The script runs anywhere with `gh`
-logged in: `scripts/dependency-branch.sh --dry-run` in a clone prints what a
-run would do, without pushing or writing to GitHub.
+   | Reason | Holds when |
+   |---|---|
+   | `opted-out` | `auto-promote` is off. |
+   | `conflict` | this run's sync conflicted, or GitHub calls the PR `DIRTY`. |
+   | `major` | a Dependabot commit on the branch since `main` bumps a major version, or carries no update metadata (fail safe). |
+   | `ci-red` | `ci` on the PR head finished with anything but success. |
+   | `unsettled` | an open Dependabot PR into the branch has `ci` that isn't red. |
+   | `ci-pending` | `ci` on the PR head hasn't finished, or the head isn't the synced branch yet. |
+   | `outside-window` | now is outside `window`. Left out when `opted-out` is recorded. |
 
-Merging the promotion PR and merging security updates are NEU-2229.
+   Major bumps are read from the `updated-dependencies:` metadata block in
+   Dependabot's commit messages, the one `dependabot/fetch-metadata` parses.
+   A held PR's body ends in the reasons, plus a marker the digest reads. A
+   promoting run merges the PR and leaves its body alone.
+
+   ```
+   **Held:** major, outside-window
+   <!-- dependency-branch:hold major outside-window -->
+   ```
+5. **Security updates.** Dependabot opens security updates against `main`
+   whatever `target-branch` says. Each open one is merged (merge commit) when
+   none of `opted-out`, `major`, `ci-red`, `ci-pending` or `outside-window`
+   holds, `major` including a PR with no Dependabot commit to read metadata
+   from. A held one is left alone. The `main` ruleset still applies, since
+   the app doesn't bypass it. After such a merge, the next scheduled run syncs
+   `main` into the branch.
+
+The action list goes to the step summary, including `promote <n>`,
+`hold <n> <reason>...`, `security-merge <n>` and `security-hold <n> <reason>...`.
+The script runs anywhere with `gh` logged in:
+`scripts/dependency-branch.sh --dry-run [--auto-promote]` in a clone prints
+what a run would do, without pushing or writing to GitHub.
 
 The caller, `.github/workflows/dependencies.yml`:
 

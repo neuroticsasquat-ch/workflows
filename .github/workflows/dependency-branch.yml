@@ -1,5 +1,6 @@
 # Keep a repo's dependency branch (updates/dependencies) current with main,
-# auto-merge Dependabot PRs into it, and keep the promotion PR to main open.
+# auto-merge Dependabot PRs into it, keep the promotion PR to main open, and,
+# with auto-promote, merge it and Dependabot security updates inside the window.
 # Callers run it from .github/workflows/dependencies.yml (the template is in the
 # README) on push to the dependency branch, on a schedule and by hand.
 #
@@ -15,12 +16,16 @@ on:
     inputs:
       auto-promote:
         description: >-
-          Merge the promotion PR when the guards in the project spec's Decision
-          17 hold. Accepted but not acted on yet (NEU-2229).
+          Merge the promotion PR, and green Dependabot security PRs into main,
+          when every guard holds: inside the window, ci green, the batch
+          settled and no major bump. Off, nothing is ever merged into main.
         type: boolean
         default: false
       window:
-        description: The promotion window for auto-promote (NEU-2229).
+        description: >-
+          When auto-promote may merge: `<Day> <HH:MM>-<HH:MM> <IANA zone>`,
+          start inclusive, end exclusive, within one day. A malformed window
+          fails the run.
         type: string
         default: Sat 10:00-18:00 America/New_York
       app-client-id:
@@ -79,15 +84,19 @@ jobs:
           git -C repo config user.name "${SLUG}[bot]"
           git -C repo config user.email "${id}+${SLUG}[bot]@users.noreply.github.com"
 
-      - name: Sync, auto-merge, promotion PR
+      - name: Sync, auto-merge, promotion PR, promote, security updates
         working-directory: repo
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          AUTO_PROMOTE: ${{ inputs.auto-promote }}
+          WINDOW: ${{ inputs.window }}
         run: |
+          args=(--window "$WINDOW")
+          if [[ $AUTO_PROMOTE == true ]]; then args+=(--auto-promote); fi
           {
             echo '## dependency-branch'
             echo '```'
-            ../tooling/scripts/dependency-branch.sh
+            ../tooling/scripts/dependency-branch.sh "${args[@]}"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
