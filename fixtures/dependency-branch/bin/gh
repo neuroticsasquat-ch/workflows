@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# A stand-in for gh, for test.sh. Reads answer from canned JSON in $FAKE_GH_DIR and appends every
+# write to $FAKE_GH_DIR/writes.log, one line per call, the --body value dropped.
+set -euo pipefail
+
+dir=${FAKE_GH_DIR:?FAKE_GH_DIR is not set}
+args="$*"
+
+case "$1 $2" in
+  "pr list")
+    if [[ $args == *"--state merged"* ]]; then
+      cat "$dir/merged.json"
+    elif [[ $args == *"--head "* ]]; then
+      cat "$dir/promotion.json"
+    else
+      cat "$dir/open.json"
+    fi
+    ;;
+  "pr view")
+    cat "$dir/comments.json"
+    ;;
+  "pr merge" | "pr create" | "pr edit" | "pr comment")
+    echo "${args%% --body*}" >>"$dir/writes.log"
+    if [[ $2 == create ]]; then
+      echo "https://github.com/example/repo/pull/31"
+    fi
+    ;;
+  *)
+    echo "fake gh: unexpected call: gh $args" >&2
+    exit 1
+    ;;
+esac

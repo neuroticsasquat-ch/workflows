@@ -268,6 +268,90 @@ jobs:
 - Deploy steps after the publish (Azure, Tofu) stay caller jobs that need
   `publish`.
 
+## `dependency-branch.yml`
+
+Keeps a repo's dependency branch, `updates/dependencies`, current with
+`main`, auto-merges Dependabot PRs into it, and keeps the promotion PR from it
+to `main` open. It replaces `merge-main-into-dependencies.yml`, the weekly PR
+that merged `main` back in, and the hand-merging of Dependabot PRs.
+
+It acts as the automation app (ADR-0007 in the ops repo), not `GITHUB_TOKEN`.
+The app is the only bypass actor on the integration ruleset, so its sync push
+to `updates/dependencies` is allowed. And the promotion PR it opens gets a `ci`
+check, which a PR opened by `GITHUB_TOKEN` never does. `main` still takes a PR
+and a green `ci` from the app like anyone else.
+
+| Input / secret | Default | Meaning |
+|---|---|---|
+| `auto-promote` | `false` | Merge the promotion PR when the guards hold. Accepted, not yet acted on (NEU-2229). Every adopter except fundlens passes `true`. |
+| `window` | `Sat 10:00-18:00 America/New_York` | The promotion window for `auto-promote` (NEU-2229). |
+| `app-client-id` | the app's client ID | Public, so it's the default. |
+| secret `app-private-key` | required | The app's private key, from `AUTOMATION_APP_PRIVATE_KEY`. Pass it explicitly: `secrets: inherit` doesn't cross owners. |
+
+Each run mints an app token with `actions/create-github-app-token` and checks
+out `updates/dependencies` with full history using it. It checks out
+`scripts/` from this repo at the commit the caller's `@v1` resolved to
+(`job.workflow_repository` and `job.workflow_sha`), and runs
+`scripts/dependency-branch.sh`:
+
+1. **Sync.** If `main` isn't an ancestor of `updates/dependencies`, merge it
+   in and push as the app. When the branch isn't ahead, that's a fast-forward
+   and can't conflict. A conflicting merge is abandoned and remembered.
+2. **Auto-merge.** Every open Dependabot PR into `updates/dependencies`
+   without auto-merge, whose `ci` hasn't finished, gets it (merge commit),
+   majors included, and merges once `ci` is green. One whose `ci` is already
+   green and that is mergeable is merged directly, because GitHub refuses
+   auto-merge on it. One whose `ci` is red is left open for a person. The
+   script reads `ci` itself instead of relying on GitHub to hold the merge
+   back, because the app bypasses the integration ruleset.
+3. **Promotion PR.** While `updates/dependencies` differs in content from
+   `main`, a PR into `main` titled `chore(deps): promote dependency updates`
+   stays open. Its body lists the Dependabot PRs merged into the branch since
+   `main` last contained it, and is rewritten when that list changes. After a
+   conflicting sync, the PR gets a comment with the steps to resolve the
+   conflict through a PR of your own. The comment is posted once for each
+   `main` commit, not on every run.
+
+The action list goes to the step summary. The script runs anywhere with `gh`
+logged in: `scripts/dependency-branch.sh --dry-run` in a clone prints what a
+run would do, without pushing or writing to GitHub.
+
+Merging the promotion PR and merging security updates are NEU-2229.
+
+The caller, `.github/workflows/dependencies.yml`:
+
+```yaml
+name: dependencies
+on:
+  push:
+    branches: [updates/dependencies]
+  schedule:
+    - cron: "0 11 * * *"         # daily, before Dependabot's Saturday 09:00 ET run
+    - cron: "*/30 13-23 * * 6"   # every 30 min on Saturdays, covering the window in EST and EDT
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dependencies
+  cancel-in-progress: false
+jobs:
+  dependency-branch:
+    uses: neuroticsasquat-ch/workflows/.github/workflows/dependency-branch.yml@v1
+    with:
+      auto-promote: true
+    secrets:
+      app-private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+```
+
+- The `push` trigger reacts to a Dependabot PR merging, so the promotion PR's
+  body is current within minutes. The schedules catch everything else, such
+  as `main` moving.
+- One run at a time, never cancelled. Two runs pushing the same sync would
+  race.
+- The repo needs *Allow auto-merge* on, the app installed, the
+  `AUTOMATION_APP_PRIVATE_KEY` secret and the rulesets: the repo contract in
+  the ops project spec.
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
@@ -284,6 +368,16 @@ reusable workflow has a job there that calls it by local path
 | `image-docker` | `fixtures/docker` | the last stage, which runs as a non-root user; `build-args`; `.github/ci/smoke.sh` runs the image's CLI |
 | `image-docker-allow-root` | `fixtures/docker` | an explicit `file`, `target: runtime-root` (no `USER` line), `allow-root: true` |
 | `publish` | `fixtures/docker` | `image-publish.yml`, called the way a caller calls it (after `ci`, push to `main` only), pushing `ghcr.io/neuroticsasquat-ch/workflows-fixture` |
+
+`dependency-branch.yml` can't be called here: it needs the app's private key.
+Its script is tested instead by the `dependency-branch` job, which runs
+`fixtures/dependency-branch/test.sh`. That builds scratch repos with
+`git init` and a local bare remote and runs the script against them, with
+`fixtures/dependency-branch/bin/gh` standing in for `gh`. Three dry-run cases
+check the action list: behind only, ahead and behind merging cleanly, and
+ahead and behind conflicting. Real runs then check that the clean merge lands
+on the remote, the conflict leaves it alone, and the conflict comment isn't
+repeated.
 
 A job that calls a reusable workflow can't take `continue-on-error`, so the
 failing cases (a root image without `allow-root`, a smoke script that exits 1)
