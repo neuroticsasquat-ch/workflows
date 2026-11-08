@@ -20,6 +20,7 @@ jobs:
 
 - Releases are tagged `v1.x.y`. `v1` is moved to a release by hand, and only
   after this repo's own CI (`self-test.yml`) is green.
+  [RELEASING.md](RELEASING.md) has the commands.
 - A breaking change to an input or to the repo contract is `v2`, adopted repo
   by repo.
 - Don't pin a caller to `@main` or to an exact `v1.x.y` tag. Callers'
@@ -37,6 +38,7 @@ The decision record is ADR-0005 in the ops repo
 | `rulesets/` | the ruleset bodies (JSON), the single definition |
 | `scripts/` | tooling, such as applying the rulesets |
 | `fixtures/` | small projects that `self-test.yml` runs each workflow against |
+| `RELEASING.md` | how to cut a `v1.x.y` release and move `v1` |
 
 ## Rulesets
 
@@ -89,6 +91,64 @@ jobs:
 `ci` has to be a plain job like this one. A job that calls a reusable workflow
 reports as `<caller> / <called>` (`ci / gate`), and the rulesets require exactly
 `ci`. That's why the gate is a composite action and not a reusable workflow.
+
+### Mixed repos
+
+A repo with Python in `backend/` and pnpm in `frontend/` adds a `changes` job
+and gates each language's job on its filter. A skipped job passes the gate, so
+a frontend-only change skips `python` and `ci` still goes green. Extra checks
+are further jobs in `ci`'s needs. `self-test.yml` runs this shape against
+`fixtures/mixed`.
+
+```yaml
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, pull-requests: read }
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      # Credentials stay persisted: on a push, paths-filter fetches the
+      # previous commit with git, which a private repo refuses anonymously.
+      - uses: actions/checkout@v7.0.1
+      - id: filter
+        uses: dorny/paths-filter@v4.0.3
+        with:
+          filters: |
+            backend: [backend/**, .github/workflows/ci.yml]
+            frontend: [frontend/**, .github/workflows/ci.yml]
+  python:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    uses: neuroticsasquat-ch/workflows/.github/workflows/python.yml@v1
+    with:
+      working-directory: backend
+  js:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    uses: neuroticsasquat-ch/workflows/.github/workflows/js.yml@v1
+    with:
+      working-directory: frontend
+  ci:
+    if: always()
+    needs: [changes, python, js]   # extras included
+    runs-on: ubuntu-latest
+    steps:
+      - uses: neuroticsasquat-ch/workflows/actions/gate@v1
+        with:
+          needs: ${{ toJSON(needs) }}
+```
+
+- Each filter also matches `ci.yml`, so a change to the caller itself runs
+  both jobs.
+- On a PR, paths-filter lists the PR's files through the API, which needs
+  `pull-requests: read`.
+- `changes` is in `ci`'s needs too: if it fails, the jobs it gates are skipped,
+  and only its own failure turns `ci` red.
+- A `publish` job after `ci` must test `needs.ci.result == 'success'` (see
+  `image-publish.yml` below). Otherwise it is skipped on every push where a
+  filter matched nothing.
 
 ## `python.yml`
 
