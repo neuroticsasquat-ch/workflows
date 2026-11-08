@@ -1,0 +1,8 @@
+# actionlint 1.7.12 (the newest, pinned in self-test.yml) predates the job
+# context's workflow_* properties. GitHub documents them: for a job in a
+# reusable workflow they name that workflow's own repo and commit. Drop this
+# once actionlint knows them.
+paths:
+  .github/workflows/dependency-branch.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

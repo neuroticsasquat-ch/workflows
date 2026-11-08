@@ -1,0 +1,93 @@
+# Keep a repo's dependency branch (updates/dependencies) current with main,
+# auto-merge Dependabot PRs into it, and keep the promotion PR to main open.
+# Callers run it from .github/workflows/dependencies.yml (the template is in the
+# README) on push to the dependency branch, on a schedule and by hand.
+#
+# It acts as the automation app (ops ADR-0007), the only bypass actor on the
+# integration ruleset. GITHUB_TOKEN can't push to updates/*, and a PR it opens
+# never gets the `ci` check main requires. The steps are
+# scripts/dependency-branch.sh, checked out from this repo at the commit the
+# caller's reference resolved to.
+name: dependency-branch
+
+on:
+  workflow_call:
+    inputs:
+      auto-promote:
+        description: >-
+          Merge the promotion PR when the guards in the project spec's Decision
+          17 hold. Accepted but not acted on yet (NEU-2229).
+        type: boolean
+        default: false
+      window:
+        description: The promotion window for auto-promote (NEU-2229).
+        type: string
+        default: Sat 10:00-18:00 America/New_York
+      app-client-id:
+        description: The automation app's client ID. Public.
+        type: string
+        default: Iv23li9H17twmhg3CZou
+    secrets:
+      app-private-key:
+        description: >-
+          The automation app's private key. Pass it explicitly: `secrets: inherit`
+          doesn't cross owners.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-branch:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Scoped to the calling repo, with the app's installation permissions.
+      - id: app
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+
+      # Checked out with the app's token, which stays in the clone's git config
+      # so the sync push goes out as the app.
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: updates/dependencies
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+          path: repo
+
+      # The script from this repo, at the commit this workflow was called at.
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tooling
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      # The sync merge commit is authored by the app's bot user.
+      - name: Commit as the app
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          id=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          git -C repo config user.name "${SLUG}[bot]"
+          git -C repo config user.email "${id}+${SLUG}[bot]@users.noreply.github.com"
+
+      - name: Sync, auto-merge, promotion PR
+        working-directory: repo
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          {
+            echo '## dependency-branch'
+            echo '```'
+            ../tooling/scripts/dependency-branch.sh
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

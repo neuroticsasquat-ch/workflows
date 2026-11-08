@@ -36,12 +36,22 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh fixtures/*/*.sh fixtures/*/.github/ci/*.sh
+        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh fixtures/*/*.sh fixtures/*/bin/* fixtures/*/.github/ci/*.sh
       - name: Ruleset bodies are valid JSON
         run: |
           for file in rulesets/*.json; do
             jq -e . "$file" >/dev/null || { echo "::error file=$file::not valid JSON"; exit 1; }
           done
+
+  # dependency-branch.yml's steps, run against scratch repos with a local bare
+  # remote and a stand-in gh. Calling the workflow itself needs the app's key.
+  dependency-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: fixtures/dependency-branch/test.sh
 
   # --- Fixture harness -------------------------------------------------------
   # Each reusable workflow is called here by local path, against a small project
@@ -154,6 +164,7 @@ jobs:
     needs:
       - actionlint
       - scripts
+      - dependency-branch
       - python-plain
       - python-plain-ty
       - python-postgres-alembic
