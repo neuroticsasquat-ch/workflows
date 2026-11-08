@@ -1,16 +1,17 @@
 import os
 
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
-
-from models import Item
+from sqlalchemy import create_engine, text
 
 
-def test_item_round_trips_through_the_database() -> None:
+# Depends only on .github/ci/env and setup.sh, not on the Alembic steps, so a red
+# Alembic check doesn't turn pytest red too.
+def test_setup_sh_created_the_app_schema() -> None:
     engine = create_engine(os.environ["DATABASE_URL"])
-    with Session(engine) as session:
-        session.add(Item(name="fixture"))
-        session.flush()
-        names = session.scalars(select(Item.name)).all()
-        session.rollback()
-    assert names == ["fixture"]
+    with engine.connect() as connection:
+        found = connection.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.schemata"
+                " WHERE schema_name = 'app'"
+            )
+        )
+    assert found == 1

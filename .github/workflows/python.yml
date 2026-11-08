@@ -1,7 +1,7 @@
 # CI for a uv-managed Python project: install from the lock, then lint, format,
 # typecheck, the Alembic checks (when Alembic is used) and pytest. Repo
 # specifics live in the project's tool config, not here; this runs bare
-# commands. The repo contract is in the README.
+# commands. The inputs and the repo contract are in the README.
 name: python
 
 on:
@@ -61,22 +61,24 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      # The CI convention files live in .github/ci/ in the working directory,
-      # or at the repo root when the working directory has none.
+      # Each CI convention file is looked up in .github/ci/ under the working
+      # directory first, then at the repo root.
       - name: Load .github/ci/env
         id: ci-files
         run: |
-          ci_dir=""
-          for dir in .github/ci "$GITHUB_WORKSPACE/.github/ci"; do
-            if [[ -d $dir ]]; then
-              ci_dir=$(cd "$dir" && pwd)
-              break
-            fi
-          done
-          echo "dir=$ci_dir" >> "$GITHUB_OUTPUT"
+          find_ci_file() {
+            local candidate
+            for candidate in ".github/ci/$1" "$GITHUB_WORKSPACE/.github/ci/$1"; do
+              if [[ -f $candidate ]]; then
+                realpath "$candidate"
+                return
+              fi
+            done
+          }
+          echo "setup=$(find_ci_file setup.sh)" >> "$GITHUB_OUTPUT"
 
-          env_file="$ci_dir/env"
-          if [[ -z $ci_dir || ! -f $env_file ]]; then
+          env_file=$(find_ci_file env)
+          if [[ -z $env_file ]]; then
             echo "No .github/ci/env"
             exit 0
           fi
@@ -93,8 +95,13 @@ jobs:
             fi
             name=${BASH_REMATCH[1]}
             value=${BASH_REMATCH[2]}
-            if [[ $value =~ ^\"(.*)\"$ || $value =~ ^\'(.*)\'$ ]]; then
+            # A quoted value is taken as is; an unquoted one loses a trailing
+            # " # comment" and trailing whitespace.
+            if [[ $value =~ ^\"([^\"]*)\"[[:space:]]*(#.*)?$ || $value =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
               value=${BASH_REMATCH[1]}
+            else
+              value=${value%%[[:space:]]#*}
+              value=${value%"${value##*[![:space:]]}"}
             fi
             echo "$name=$value" >> "$GITHUB_ENV"
             echo "  $name"
@@ -115,10 +122,11 @@ jobs:
       - name: Run .github/ci/setup.sh
         id: setup
         env:
-          CI_DIR: ${{ steps.ci-files.outputs.dir }}
+          SETUP_SH: ${{ steps.ci-files.outputs.setup }}
         run: |
-          if [[ -n $CI_DIR && -f $CI_DIR/setup.sh ]]; then
-            bash "$CI_DIR/setup.sh"
+          if [[ -n $SETUP_SH ]]; then
+            echo "Running $SETUP_SH"
+            bash "$SETUP_SH"
           else
             echo "No .github/ci/setup.sh"
           fi
