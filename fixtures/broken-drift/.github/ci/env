@@ -1,0 +1,7 @@
+# Test-only values, loaded into the job's environment. Never secrets.
+DATABASE_URL=postgresql+psycopg://root:root@localhost:5432/postgres
+# For psql in setup.sh.
+PGHOST=localhost
+PGUSER=root
+PGPASSWORD=root
+PGDATABASE=postgres

@@ -64,6 +64,23 @@ jobs:
       working-directory: fixtures/python-postgres-alembic
       postgres: "17"
 
+  broken-three:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/broken-three
+
+  broken-two-heads:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/broken-two-heads
+      postgres: "17"
+
+  broken-drift:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/broken-drift
+      postgres: "17"
+
   # The gate self-test: `ci` sees one job that succeeded and one that was
   # skipped, and must pass.
 
