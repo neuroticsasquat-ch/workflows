@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A stand-in for gh, for test.sh. Reads answer from canned JSON in $FAKE_GH_DIR and appends every
-# write to $FAKE_GH_DIR/writes.log, one line per call, the --body value dropped.
+# write to $FAKE_GH_DIR/writes.log, one line per call, the --body value dropped. A --body value is
+# appended to $FAKE_GH_DIR/bodies.log, after a `== <the writes.log line>` header.
 set -euo pipefail
 
 dir=${FAKE_GH_DIR:?FAKE_GH_DIR is not set}
@@ -12,6 +13,9 @@ case "$1 $2" in
       cat "$dir/merged.json"
     elif [[ $args == *"--head "* ]]; then
       cat "$dir/promotion.json"
+    elif [[ $args == *"--base main "* ]]; then
+      # Security updates: Dependabot PRs into the base.
+      cat "$dir/security.json" 2>/dev/null || echo '[]'
     else
       cat "$dir/open.json"
     fi
@@ -20,8 +24,15 @@ case "$1 $2" in
     cat "$dir/comments.json"
     ;;
   "pr merge" | "pr create" | "pr edit" | "pr comment")
+    verb=$2
     echo "${args%% --body*}" >>"$dir/writes.log"
-    if [[ $2 == create ]]; then
+    while [[ $# -gt 0 ]]; do
+      if [[ $1 == --body ]]; then
+        printf '== %s\n%s\n' "${args%% --body*}" "$2" >>"$dir/bodies.log"
+      fi
+      shift
+    done
+    if [[ $verb == create ]]; then
       echo "https://github.com/example/repo/pull/31"
     fi
     ;;

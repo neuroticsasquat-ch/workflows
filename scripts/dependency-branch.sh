@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The steps behind dependency-branch.yml: keep the dependency branch current with main, auto-merge
-# Dependabot PRs into it, and keep the promotion PR to main open.
+# Dependabot PRs into it, keep the promotion PR to main open, and merge it and security updates.
 #
-#   scripts/dependency-branch.sh [--branch updates/dependencies] [--base main] [--dry-run]
+#   scripts/dependency-branch.sh [--branch updates/dependencies] [--base main] [--dry-run] [--auto-promote] [--window "Sat 10:00-18:00 America/New_York"] [--now 2026-11-07T15:00:00Z]
 #
 # Runs in a clone whose `origin` is the repo, with `gh` logged in for that repo (GH_TOKEN and
 # GH_REPO in the workflow). In the workflow both act as the automation app, the integration
@@ -18,8 +18,21 @@
 #    hold the merge back: the app is a bypass actor on <branch>.
 # 3. Promotion PR: while the synced branch differs in content from <base>, a PR <branch> -> <base>
 #    is kept open, its body listing the Dependabot PRs merged into <branch> since <base> last
-#    contained it. After a conflicting sync it gets one comment per <base> commit, with the steps
-#    to resolve the conflict.
+#    contained it, and ending in the hold reasons when step 4 holds. After a conflicting sync it
+#    gets one comment per <base> commit, with the steps to resolve the conflict.
+# 4. Promote: the promotion PR is merged (merge commit) when no guard holds. Every guard that
+#    fails is recorded, in this order: opted-out (no --auto-promote), conflict, major (a Dependabot
+#    commit in <base>..HEAD bumps a major, or has no update metadata), ci-red, unsettled (an open
+#    Dependabot PR into <branch> whose `ci` isn't red), ci-pending (`ci` unfinished, or the PR head
+#    isn't HEAD), outside-window (left out when opted-out). The PR body carries the reasons as
+#    `<!-- dependency-branch:hold <reason>... -->` for the digest.
+# 5. Security: every open Dependabot PR into <base> is merged (merge commit) when none of
+#    opted-out, major, ci-red, ci-pending, outside-window holds. A PR with no Dependabot commit
+#    has no update metadata at all, so it counts as major too.
+#
+# The window is `<Day> <HH:MM>-<HH:MM> <IANA zone>`, start inclusive, end exclusive, within one day.
+# --now (ISO-8601 UTC, default the current time) is for the self-test. A malformed window or --now
+# exits 2.
 #
 # Prints the action list on stdout, one line per action:
 #   sync none|fast-forward|merge|conflict
@@ -27,6 +40,8 @@
 #   auto-merge <n>      merge <n>      red <n>
 #   promotion-pr none|create|update <n>|keep <n>
 #   conflict-comment <n>|new [exists]
+#   promote <n>         hold <n> <reason>...
+#   security-merge <n>  security-hold <n> <reason>...
 # Everything else goes to stderr. --dry-run decides every action the way a real run would,
 # including whether the sync conflicts (git merge-tree, which leaves the worktree alone), and makes
 # no push and no gh write. gh reads still run. The checkout is left detached at the synced commit.
@@ -35,12 +50,41 @@ set -euo pipefail
 BRANCH=updates/dependencies
 BASE=main
 DRY_RUN=false
+AUTO_PROMOTE=false
+WINDOW='Sat 10:00-18:00 America/New_York'
+NOW=
 PROMOTION_TITLE='chore(deps): promote dependency updates'
 DEPENDABOT=app/dependabot
+# The author name on the commits Dependabot makes.
+DEPENDABOT_AUTHOR='dependabot[bot]'
 CONFLICT_MARKER=dependency-branch:sync-conflict
+HOLD_MARKER=dependency-branch:hold
+
+# jq definitions shared by the queries below.
+# shellcheck disable=SC2016 # jq variables, not shell ones.
+JQ_DEFS='
+  # The latest `ci` result: a check run reports a conclusion once it finishes, a commit status a
+  # state. No `ci` yet, or one still running, is PENDING.
+  def ci_state:
+    ([.statusCheckRollup[]? | select((.name // .context) == "ci")] | last)
+    | if . == null then "PENDING"
+      else ((.conclusion // "") as $c | if $c != "" then $c else (.state // "PENDING") end) end;
+  # Why a Dependabot commit message makes the batch major, or empty when it does not. Missing or
+  # incomplete update metadata counts as major.
+  def major_reason:
+    if test("(^|\n)updated-dependencies:") | not then "no updated-dependencies metadata"
+    elif ([scan("(^|\n)[ \t-]*update-type:")] | length)
+      < ([scan("(^|\n)[ \t-]*dependency-name:")] | length) then "an update without update-type"
+    elif test("update-type: version-update:semver-major") then "semver-major"
+    else empty end;
+'
 
 usage() {
   sed -n '5p' "${BASH_SOURCE[0]}" | sed 's/^# *//' >&2
+  exit 2
+}
+fatal() {
+  echo "::error title=dependency-branch::$*" >&2
   exit 2
 }
 
@@ -49,6 +93,9 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH=${2:?--branch needs a value}; shift 2 ;;
     --base) BASE=${2:?--base needs a value}; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --auto-promote) AUTO_PROMOTE=true; shift ;;
+    --window) WINDOW=${2:?--window needs a value}; shift 2 ;;
+    --now) NOW=${2:?--now needs a value}; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -64,6 +111,44 @@ write() {
   fi
   "$@"
 }
+
+# Adds a hold reason to $reasons, a space-separated list.
+hold_reason() { reasons="${reasons:+$reasons }$1"; }
+
+# --- The window ------------------------------------------------------------------
+
+day_re='(Mon|Tue|Wed|Thu|Fri|Sat|Sun)'
+time_re='([01][0-9]|2[0-3]):([0-5][0-9])'
+if ! [[ $WINDOW =~ ^$day_re\ $time_re-$time_re\ ([A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*)$ ]]; then
+  fatal "malformed window '$WINDOW': expected '<Day> <HH:MM>-<HH:MM> <IANA zone>', e.g. 'Sat 10:00-18:00 America/New_York'"
+fi
+window_day=${BASH_REMATCH[1]}
+window_start=$((10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
+window_end=$((10#${BASH_REMATCH[4]} * 60 + 10#${BASH_REMATCH[5]}))
+window_zone=${BASH_REMATCH[6]}
+if [[ $window_start -ge $window_end ]]; then
+  fatal "malformed window '$WINDOW': the start must be before the end, within one day"
+fi
+# TZ falls back to UTC for a zone it doesn't know, so check the zone database instead.
+if [[ ! -f /usr/share/zoneinfo/$window_zone ]]; then
+  fatal "unknown time zone '$window_zone' in window '$WINDOW'"
+fi
+if [[ -n $NOW ]]; then
+  now_epoch=$(jq -n --arg now "$NOW" '$now | fromdateiso8601' 2>/dev/null) ||
+    fatal "malformed --now '$NOW': expected an ISO-8601 UTC instant, e.g. 2026-11-07T15:00:00Z"
+else
+  now_epoch=$(jq -n 'now | floor')
+fi
+# The weekday (Sun = 0) and minute of the day, in the window's zone.
+read -r now_wday now_minute < <(TZ=$window_zone jq -nr --argjson t "$now_epoch" \
+  '$t | localtime | "\(.[6]) \(.[3] * 60 + .[4])"')
+days=(Sun Mon Tue Wed Thu Fri Sat)
+in_window=false
+if [[ ${days[$now_wday]} == "$window_day" && $now_minute -ge $window_start && $now_minute -lt $window_end ]]; then
+  in_window=true
+fi
+log "Now is $(TZ=$window_zone jq -nr --argjson t "$now_epoch" '$t | localtime | strftime("%a %H:%M")') in $window_zone: $(
+  [[ $in_window == true ]] && echo inside || echo outside) the window $WINDOW."
 
 # --- 1. Sync ---------------------------------------------------------------
 
@@ -133,26 +218,26 @@ while IFS=$'\t' read -r number merge_state ci; do
     write gh pr merge --auto --merge "$number" ||
       warn "couldn't enable auto-merge on #$number; the next run tries again."
   fi
-done < <(jq -r --arg bot "$DEPENDABOT" '
+done < <(jq -r --arg bot "$DEPENDABOT" "$JQ_DEFS"'
   sort_by(.number)[]
   | select(.author.login == $bot and .autoMergeRequest == null)
-  # The latest `ci` result: a check run reports a conclusion once it finishes, a commit status a
-  # state. No `ci` yet, or one still running, is PENDING.
-  | ([.statusCheckRollup[]? | select((.name // .context) == "ci")] | last) as $ci
-  | ($ci | if . == null then "PENDING" else ((.conclusion // "") as $c | if $c != "" then $c else (.state // "PENDING") end) end) as $ci
-  | [.number, .mergeStateStatus, $ci] | @tsv
+  | [.number, .mergeStateStatus, ci_state] | @tsv
 ' <<<"$open_prs")
 
-# --- 3. Promotion PR -----------------------------------------------------------
+# --- 3. Promotion PR, with step 4's decision ---------------------------------------
 
 promotion=$(gh pr list --base "$BASE" --head "$BRANCH" --state open --limit 1 \
-  --json number,body)
+  --json number,body,headRefOid,mergeStateStatus,statusCheckRollup)
 promotion_number=$(jq -r '.[0].number // empty' <<<"$promotion")
+# Step 4's hold reasons, decided here so the body written below carries them.
+reasons=
+promotion_needed=false
 
 if git diff --quiet "origin/$BASE" HEAD; then
   log "$BRANCH has the same content as $BASE: no promotion PR needed."
   action "promotion-pr none"
 else
+  promotion_needed=true
   # Dependabot PRs whose merge commit is on the branch but not yet in the base.
   unpromoted=$(git rev-list "origin/$BASE..HEAD" | jq -R . | jq -s .)
   merged_prs=$(gh pr list --base "$BRANCH" --state merged --limit 200 \
@@ -167,10 +252,54 @@ else
 Dependabot PRs merged into \`$BRANCH\` since \`$BASE\` last contained it:
 
 ${list:-"- none: the difference is commits made by hand"}"
+
+  # --- 4. The promotion guards, every failing one recorded, in a fixed order ---
+  [[ $AUTO_PROMOTE == true ]] || hold_reason opted-out
+  if [[ $conflict == true || $(jq -r '.[0].mergeStateStatus // ""' <<<"$promotion") == DIRTY ]]; then
+    hold_reason conflict
+  fi
+  # The batch: the Dependabot commits the merged Dependabot PRs brought in, merges excluded.
+  major_commits=$(git log -z --no-merges --format='%H%x1f%an%x1f%B' "origin/$BASE..HEAD" |
+    jq -r -R -s --arg author "$DEPENDABOT_AUTHOR" "$JQ_DEFS"'
+      split("\u0000")[] | select(length > 0) | split("\u001f")
+      | select(.[1] == $author) | (.[2] | major_reason) as $why | "\(.[0][0:7]): \($why)"')
+  if [[ -n $major_commits ]]; then
+    log "The batch is major:"
+    log "$major_commits"
+    hold_reason major
+  fi
+  promotion_ci=$(jq -r "$JQ_DEFS"'.[0] // {} | ci_state' <<<"$promotion")
+  case $promotion_ci in
+    SUCCESS | PENDING) ;;
+    *) log "ci on the promotion PR is $promotion_ci."; hold_reason ci-red ;;
+  esac
+  unsettled=$(jq -r --arg bot "$DEPENDABOT" "$JQ_DEFS"'
+    [sort_by(.number)[] | select(.author.login == $bot) | select(ci_state | IN("SUCCESS", "PENDING"))
+     | "#\(.number)"] | join(" ")' <<<"$open_prs")
+  if [[ -n $unsettled ]]; then
+    log "The batch isn't settled: $unsettled still open."
+    hold_reason unsettled
+  fi
+  head_oid=$(jq -r '.[0].headRefOid // ""' <<<"$promotion")
+  if [[ $promotion_ci == PENDING || $head_oid != "$(git rev-parse HEAD)" ]]; then
+    log "ci on the promotion PR is pending, or its head (${head_oid:-none yet}) isn't $(git rev-parse HEAD)."
+    hold_reason ci-pending
+  fi
+  if [[ $AUTO_PROMOTE == true && $in_window == false ]]; then hold_reason outside-window; fi
+
+  if [[ -n $reasons ]]; then
+    body="$body
+
+**Held:** ${reasons// /, }
+<!-- $HOLD_MARKER $reasons -->"
+  fi
   log "Promotion PR body:"
   log "$body"
 
-  if [[ -z $promotion_number ]]; then
+  if [[ -z $reasons ]]; then
+    # Step 4 merges it, so the body is left as it is.
+    action "promotion-pr keep $promotion_number"
+  elif [[ -z $promotion_number ]]; then
     action "promotion-pr create"
     if [[ $DRY_RUN == true ]]; then
       promotion_number=new
@@ -226,3 +355,49 @@ Use a **merge commit**, not a squash. The merge commit is what makes \`$BASE\` a
     fi
   fi
 fi
+
+# --- 4. Promote ------------------------------------------------------------------
+
+if [[ $promotion_needed == true ]]; then
+  if [[ -z $reasons ]]; then
+    action "promote $promotion_number"
+    write gh pr merge --merge "$promotion_number" ||
+      warn "couldn't merge the promotion PR #$promotion_number; the next run tries again."
+  else
+    action "hold $promotion_number $reasons"
+  fi
+fi
+
+# --- 5. Security updates ---------------------------------------------------------
+
+# Dependabot ignores target-branch for security updates, so they are PRs into the base.
+security_prs=$(gh pr list --base "$BASE" --state open --limit 100 \
+  --json number,author,commits,statusCheckRollup)
+while IFS=$'\t' read -r number ci why; do
+  [[ -n $number ]] || continue
+  reasons=
+  [[ $AUTO_PROMOTE == true ]] || hold_reason opted-out
+  if [[ -n $why ]]; then
+    log "#$number is major: $why"
+    hold_reason major
+  fi
+  case $ci in
+    SUCCESS) ;;
+    PENDING) hold_reason ci-pending ;;
+    *) hold_reason ci-red ;;
+  esac
+  if [[ $AUTO_PROMOTE == true && $in_window == false ]]; then hold_reason outside-window; fi
+  if [[ -z $reasons ]]; then
+    action "security-merge $number"
+    write gh pr merge --merge "$number" || warn "couldn't merge #$number; the next run tries again."
+  else
+    action "security-hold $number $reasons"
+  fi
+done < <(jq -r --arg bot "$DEPENDABOT" --arg author "$DEPENDABOT_AUTHOR" "$JQ_DEFS"'
+  sort_by(.number)[]
+  | select(.author.login == $bot)
+  | [.commits[]? | select(any(.authors[]?; .name == $author))] as $commits
+  | (if ($commits | length) == 0 then ["no Dependabot commits"]
+     else [$commits[] | .oid[0:7] as $oid | .messageBody | major_reason | "\($oid): \(.)"] end) as $why
+  | [.number, ci_state, ($why | join("; "))] | @tsv
+' <<<"$security_prs")

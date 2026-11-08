@@ -9,6 +9,10 @@
 # merge, and ahead and behind with a conflict. Each also checks that the dry run pushed nothing and
 # made no gh write. Two real runs then check that the clean merge lands on the remote and the
 # conflict leaves it alone, and that the conflict comment is posted once per base commit.
+#
+# Then step 4 and 5: one case per promotion hold reason, a promote, several reasons in one record,
+# the window across DST and at its end, security updates merged and held, and malformed windows.
+# Every one of these sets --now. Real runs check the merges and the hold marker in the PR body.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -81,13 +85,32 @@ commit_on_main() {
   git push --quiet origin main
 }
 
-# dependabot_merge <file> <content>: a PR branch merged into $BRANCH with a merge commit, the way
-# auto-merge lands one. Prints the merge commit.
+# dependabot_message <dependency> <update-type>: a Dependabot commit message, with the update
+# metadata block dependabot/fetch-metadata parses. An update type of `none` leaves the block out.
+dependabot_message() {
+  echo "build(deps): bump $1 from 1.0.0 to 2.0.0"
+  echo
+  echo "Bumps $1 from 1.0.0 to 2.0.0."
+  if [[ $2 != none ]]; then
+    printf '\n---\nupdated-dependencies:\n- dependency-name: %s\n  dependency-version: 2.0.0\n  dependency-type: direct:production\n  update-type: %s\n...\n' "$1" "$2"
+  fi
+  echo
+  echo "Signed-off-by: dependabot[bot] <support@github.com>"
+}
+
+# dependabot_merge <file> <content> [<update-type>|none]: a PR branch merged into $BRANCH with a
+# merge commit, the way auto-merge lands one. With an update type, the PR's commit is Dependabot's,
+# with its metadata; without, it's a person's. Prints the merge commit.
 dependabot_merge() {
   git switch --quiet -c "dependabot/$1" "origin/$BRANCH" 2>/dev/null || git switch --quiet "dependabot/$1"
   echo "$2" >"$1"
   git add "$1"
-  git commit --quiet -m "build(deps): bump $1"
+  if [[ -n ${3:-} ]]; then
+    git commit --quiet --author 'dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>' \
+      -m "$(dependabot_message "$1" "$3")"
+  else
+    git commit --quiet -m "build(deps): bump $1"
+  fi
   git switch --quiet -C deps "origin/$BRANCH"
   git merge --quiet --no-ff -m "Merge pull request from dependabot/$1" "dependabot/$1"
   git push --quiet origin "HEAD:refs/heads/$BRANCH"
@@ -123,6 +146,24 @@ expect_dry_run_wrote_nothing() {
   fi
   if [[ -s $CASE/gh/writes.log ]]; then
     fail "$(basename "$CASE"): the dry run made gh writes:"$'\n'"$(cat "$CASE/gh/writes.log")"
+  fi
+}
+
+# expect_no_write <line>: a gh write the real run must not have made.
+expect_no_write() {
+  if grep -qxF -- "$1" "$CASE/gh/writes.log" 2>/dev/null; then
+    fail "$(basename "$CASE"): unexpected gh write '$1'"
+  fi
+}
+
+# expect_body <write> <yes|no> <text>: whether the --body of the gh write <write> contains <text>.
+expect_body() {
+  local body
+  body=$(awk -v header="== $1" '$0 == header { on = 1; next } /^== / { on = 0 } on' "$CASE/gh/bodies.log" 2>/dev/null)
+  if [[ $2 == yes && $body != *"$3"* ]]; then
+    fail "$(basename "$CASE"): the body of '$1' lacks '$3':"$'\n'"$body"
+  elif [[ $2 == no && $body == *"$3"* ]]; then
+    fail "$(basename "$CASE"): the body of '$1' has '$3':"$'\n'"$body"
   fi
 }
 
@@ -170,7 +211,8 @@ merge 24
 red 25
 red 26
 auto-merge 27
-promotion-pr create" "(dry run)"
+promotion-pr create
+hold new opted-out unsettled ci-pending" "(dry run)"
 expect_dry_run_wrote_nothing "$before"
 if [[ $LOG != *"- #20 build(deps): bump deps.txt"* || $LOG == *"#10"* || $LOG == *"#19"* ]]; then
   fail "ahead-behind-clean: the promotion PR body should list #20 only:"$'\n'"$LOG"
@@ -184,7 +226,8 @@ merge 24
 red 25
 red 26
 auto-merge 27
-promotion-pr create" "(real run)"
+promotion-pr create
+hold 31 opted-out unsettled ci-pending" "(real run)"
 if ! git -C "$CASE/remote.git" merge-base --is-ancestor main "refs/heads/$BRANCH" ||
   ! git -C "$CASE/remote.git" merge-base --is-ancestor "$before" "refs/heads/$BRANCH"; then
   fail "ahead-behind-clean: the real run didn't push a merge of main and $BRANCH"
@@ -192,6 +235,9 @@ fi
 expect_write "pr merge --auto --merge 21"
 expect_write "pr merge --merge 24"
 expect_write "pr create --base main --head $BRANCH --title chore(deps): promote dependency updates"
+expect_body "pr create --base main --head $BRANCH --title chore(deps): promote dependency updates" yes \
+  "<!-- dependency-branch:hold opted-out unsettled ci-pending -->"
+expect_no_write "pr merge --merge 31"
 
 # --- Ahead and behind, conflicting: no push, and a comment on the promotion PR ---
 
@@ -208,7 +254,8 @@ red 25
 red 26
 auto-merge 27
 promotion-pr update 30
-conflict-comment 30" "(dry run)"
+conflict-comment 30
+hold 30 opted-out conflict unsettled ci-pending" "(dry run)"
 expect_dry_run_wrote_nothing "$before"
 
 run_script
@@ -219,7 +266,8 @@ red 25
 red 26
 auto-merge 27
 promotion-pr update 30
-conflict-comment 30" "(real run)"
+conflict-comment 30
+hold 30 opted-out conflict unsettled ci-pending" "(real run)"
 if [[ $(remote_branch) != "$before" ]]; then
   fail "ahead-behind-conflict: the real run pushed to $BRANCH"
 fi
@@ -238,7 +286,226 @@ red 25
 red 26
 auto-merge 27
 promotion-pr update 30
-conflict-comment 30 exists" "(dry run, comment already posted)"
+conflict-comment 30 exists
+hold 30 opted-out conflict unsettled ci-pending" "(dry run, comment already posted)"
+
+# --- 4. Promote: the guards ------------------------------------------------------
+
+# Saturday 2026-11-07 is in EST (UTC-5), Saturday 2026-10-31 in EDT (UTC-4).
+INSIDE=2026-11-07T17:00:00Z    # Sat 12:00 EST
+FRIDAY=2026-11-06T17:00:00Z    # Fri 12:00 EST
+WINDOW_END=2026-11-07T23:00:00Z # Sat 18:00 EST, the end of the window, so outside
+
+# promotion_pr <head oid> <ci conclusion, empty while running> <mergeStateStatus>: the open
+# promotion PR, #30, with a stale body.
+promotion_pr() {
+  jq -n --arg oid "$1" --arg ci "$2" --arg state "$3" '[{
+    "number": 30, "body": "stale", "headRefOid": $oid, "mergeStateStatus": $state,
+    "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": $ci}]
+  }]' >"$CASE/gh/promotion.json"
+}
+
+# promotion_case <name> [<update-type>|none]: $BRANCH one Dependabot merge (minor by default) ahead
+# of main, so the sync has nothing to do; no open PR into it but a red one; and the promotion PR
+# green at that merge. Sets TIP to the merge.
+promotion_case() {
+  new_case "$1"
+  TIP=$(dependabot_merge deps.txt v2 "${2:-version-update:semver-minor}")
+  echo '[{"number": 25, "author": {"login": "app/dependabot"}, "autoMergeRequest": null, "mergeStateStatus": "BLOCKED",
+    "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": "FAILURE"}]}]' >"$CASE/gh/open.json"
+  promotion_pr "$TIP" SUCCESS CLEAN
+}
+
+# expect_promotion <decision> <label>: the action list of a promotion case. A held PR's stale body
+# is rewritten; a promoted one's is left alone.
+expect_promotion() {
+  local step3="promotion-pr update 30"
+  [[ $1 != promote* ]] || step3="promotion-pr keep 30"
+  expect_actions "sync none
+red 25
+$step3
+$1" "$2"
+}
+
+promotion_case promote
+# The body still says why the last run held, and is left alone: the PR is merged.
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_actions "sync none
+red 25
+promotion-pr keep 30
+promote 30" "(dry run)"
+expect_dry_run_wrote_nothing "$TIP"
+run_script --auto-promote --now "$INSIDE"
+expect_actions "sync none
+red 25
+promotion-pr keep 30
+promote 30" "(real run)"
+expect_write "pr merge --merge 30"
+expect_no_write "pr edit 30"
+
+# A commit a person adds to a Dependabot PR has no metadata, and doesn't make the batch major.
+promotion_case promote-person-commit
+TIP=$(dependabot_merge by-hand.txt v1)
+promotion_pr "$TIP" SUCCESS CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "promote 30" "(dry run)"
+
+# Without --auto-promote nothing is merged, and the window isn't recorded.
+promotion_case opted-out
+run_script --dry-run --now "$FRIDAY"
+expect_promotion "hold 30 opted-out" "(dry run, outside the window)"
+run_script --now "$INSIDE"
+expect_promotion "hold 30 opted-out" "(real run, inside the window)"
+expect_no_write "pr merge --merge 30"
+expect_body "pr edit 30" yes "**Held:** opted-out
+<!-- dependency-branch:hold opted-out -->"
+
+promotion_case conflict
+promotion_pr "$TIP" SUCCESS DIRTY
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 conflict" "(dry run)"
+
+promotion_case major version-update:semver-major
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 major" "(dry run)"
+run_script --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 major" "(real run)"
+expect_no_write "pr merge --merge 30"
+expect_body "pr edit 30" yes "<!-- dependency-branch:hold major -->"
+
+promotion_case major-no-metadata none
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 major" "(dry run)"
+if [[ $LOG != *"no updated-dependencies metadata"* ]]; then
+  fail "major-no-metadata: the log doesn't say why the batch is major:"$'\n'"$LOG"
+fi
+
+promotion_case ci-red
+promotion_pr "$TIP" FAILURE CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 ci-red" "(dry run)"
+
+promotion_case ci-pending
+promotion_pr "$TIP" "" CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 ci-pending" "(dry run, ci running)"
+promotion_pr "$(git rev-parse "$TIP^")" SUCCESS CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 ci-pending" "(dry run, stale head)"
+
+# Green or running Dependabot PRs into the branch are part of the batch; the red one isn't.
+promotion_case unsettled
+jq '. + [{"number": 21, "author": {"login": "app/dependabot"}, "autoMergeRequest": {"enabledAt": "2026-11-07T00:00:00Z"},
+  "mergeStateStatus": "BLOCKED", "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": ""}]}]' \
+  "$CASE/gh/open.json" >"$CASE/gh/open.json.new" && mv "$CASE/gh/open.json.new" "$CASE/gh/open.json"
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 unsettled" "(dry run)"
+# One step 2 merges this run is still part of the batch: the next run sees it land.
+jq '[.[] | select(.number != 21)] + [{"number": 24, "author": {"login": "app/dependabot"}, "autoMergeRequest": null,
+  "mergeStateStatus": "CLEAN", "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": "SUCCESS"}]}]' \
+  "$CASE/gh/open.json" >"$CASE/gh/open.json.new" && mv "$CASE/gh/open.json.new" "$CASE/gh/open.json"
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_actions "sync none
+merge 24
+red 25
+promotion-pr update 30
+hold 30 unsettled" "(dry run, merged this run)"
+
+promotion_case outside-window
+run_script --dry-run --auto-promote --now "$FRIDAY"
+expect_promotion "hold 30 outside-window" "(dry run, Friday)"
+run_script --dry-run --auto-promote --now "$WINDOW_END"
+expect_promotion "hold 30 outside-window" "(dry run, Saturday 18:00)"
+run_script --dry-run --auto-promote --now 2026-11-07T22:59:59Z
+expect_promotion "promote 30" "(dry run, Saturday 17:59:59)"
+
+promotion_case several-reasons version-update:semver-major
+promotion_pr "$TIP" "" CLEAN
+run_script --dry-run --auto-promote --now "$FRIDAY"
+expect_promotion "hold 30 major ci-pending outside-window" "(dry run)"
+
+# The same local time, 10:30, inside the window in EDT and in EST; and 14:30 UTC, which is 10:30
+# in EDT, is 09:30 in EST, before the window opens.
+promotion_case dst
+run_script --dry-run --auto-promote --now 2026-10-31T14:30:00Z
+expect_promotion "promote 30" "(dry run, 10:30 EDT)"
+run_script --dry-run --auto-promote --now 2026-11-07T15:30:00Z
+expect_promotion "promote 30" "(dry run, 10:30 EST)"
+run_script --dry-run --auto-promote --now 2026-11-07T14:30:00Z
+expect_promotion "hold 30 outside-window" "(dry run, 09:30 EST)"
+
+# --- 5. Security updates ---------------------------------------------------------
+
+# security_pr <number> <ci conclusion> <update-type> [<author>]: an open PR into main.
+security_pr() {
+  jq -n --argjson number "$1" --arg ci "$2" --arg author "${4:-app/dependabot}" \
+    --arg body "$(dependabot_message "dep$1" "$3" | sed 1,2d)" '{
+    "number": $number, "author": {"login": $author},
+    "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": $ci}],
+    "commits": [{"oid": "abcdef1234567890", "authors": [{"name": "dependabot[bot]", "login": "dependabot[bot]"}],
+      "messageHeadline": "build(deps): bump dep\($number)", "messageBody": $body}]
+  }'
+}
+
+new_case security
+echo '[]' >"$CASE/gh/open.json"
+{
+  security_pr 44 FAILURE version-update:semver-patch
+  security_pr 40 SUCCESS version-update:semver-minor
+  security_pr 41 SUCCESS version-update:semver-major
+  security_pr 42 SUCCESS version-update:semver-minor tomboone
+  security_pr 43 "" version-update:semver-minor
+} | jq -s . >"$CASE/gh/security.json"
+before=$(remote_branch)
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_actions "sync none
+promotion-pr none
+security-merge 40
+security-hold 41 major
+security-hold 43 ci-pending
+security-hold 44 ci-red" "(dry run)"
+expect_dry_run_wrote_nothing "$before"
+run_script --dry-run --auto-promote --now "$FRIDAY"
+expect_actions "sync none
+promotion-pr none
+security-hold 40 outside-window
+security-hold 41 major outside-window
+security-hold 43 ci-pending outside-window
+security-hold 44 ci-red outside-window" "(dry run, outside the window)"
+run_script --now "$INSIDE"
+expect_actions "sync none
+promotion-pr none
+security-hold 40 opted-out
+security-hold 41 opted-out major
+security-hold 43 opted-out ci-pending
+security-hold 44 opted-out ci-red" "(real run, opted out)"
+if [[ -s $CASE/gh/writes.log ]]; then
+  fail "security: the opted-out run made gh writes:"$'\n'"$(cat "$CASE/gh/writes.log")"
+fi
+run_script --auto-promote --now "$INSIDE"
+expect_actions "sync none
+promotion-pr none
+security-merge 40
+security-hold 41 major
+security-hold 43 ci-pending
+security-hold 44 ci-red" "(real run)"
+expect_write "pr merge --merge 40"
+expect_no_write "pr merge --merge 41"
+
+# --- A malformed window or --now fails the run -----------------------------------
+
+new_case malformed
+for args in "--window|Sat 10:00-18:00" "--window|Saturday 10:00-18:00 America/New_York" \
+  "--window|Sat 18:00-10:00 America/New_York" "--window|Sat 10:00-24:00 America/New_York" \
+  "--window|Sat 10:00-18:00 Mars/Olympus_Mons" "--now|2026-11-07 15:00"; do
+  status=0
+  (cd "$CASE/clone" && FAKE_GH_DIR=$CASE/gh "$SCRIPT" --dry-run "${args%%|*}" "${args#*|}" >/dev/null 2>&1) || status=$?
+  if [[ $status -eq 2 ]]; then
+    echo "ok: malformed ${args%%|*} '${args#*|}' exits 2"
+  else
+    fail "malformed: ${args%%|*} '${args#*|}' exited $status, not 2"
+  fi
+done
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed"
