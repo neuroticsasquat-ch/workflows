@@ -419,7 +419,9 @@ GitHub's cron runs in UTC, so there are two: `30 22 * * 6` (18:30 EDT) and
 `30 23 * * 6` (18:30 EST). Each run passes the cron that fired to
 `scripts/digest.sh due`. That prints `true` only when the time the cron was due,
 not the time the run started, is Saturday 18:30 in New York, so exactly one of
-them posts each Saturday, across DST changes and late starts.
+them posts each Saturday, across DST changes and late starts. GitHub turns off
+scheduled workflows in a public repo after 60 days with no activity and says
+so by email. Re-enable *digest* in the Actions tab if a quiet stretch stops it.
 
 It needs the org secret `AUTOMATION_APP_PRIVATE_KEY` and the repo secret
 `DISCORD_DEPENDENCIES_WEBHOOK`. Run it by hand from the Actions tab

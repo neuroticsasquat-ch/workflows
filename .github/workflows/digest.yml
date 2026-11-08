@@ -56,7 +56,8 @@ jobs:
           if [[ -n $SCHEDULE ]]; then due=$(scripts/digest.sh due --schedule "$SCHEDULE"); fi
           echo "due=$due" >>"$GITHUB_OUTPUT"
 
-      # One token per installation, each covering every repo the app is installed on there.
+      # One token per installation, each covering every repo the app is installed on
+      # there, and scoped down to reads: the app itself can write.
       - id: ns
         if: steps.due.outputs.due == 'true'
         uses: actions/create-github-app-token@v3.3.0
@@ -64,6 +65,10 @@ jobs:
           client-id: ${{ env.APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
           owner: neuroticsasquat-ch
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+          permission-statuses: read
 
       - id: tb
         if: steps.due.outputs.due == 'true'
@@ -72,6 +77,10 @@ jobs:
           client-id: ${{ env.APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
           owner: tomboone
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+          permission-statuses: read
 
       - name: Collect each repo's promotion, holds, red and security PRs
         if: steps.due.outputs.due == 'true'

@@ -133,11 +133,12 @@ query($owner: String!, $name: String!, $branch: String!, $caller: String!) {
 # shellcheck disable=SC2016 # jq variables, not shell ones.
 REPORT_JQ='
   # The latest `ci` result, as in dependency-branch.sh: a check run reports a conclusion once it
-  # finishes, a commit status a state. No `ci` yet, or one still running, is PENDING.
+  # finishes, a commit status a state. No `ci` yet, or one still running or expected, is PENDING.
   def ci_state:
     ([.[] | select((.name // .context) == "ci")] | last)
     | if . == null then "PENDING"
-      else ((.conclusion // "") as $c | if $c != "" then $c else (.state // "PENDING") end) end;
+      else ((.conclusion // "") as $c | if $c != "" then $c else (.state // "PENDING") end) end
+    | if . == "EXPECTED" then "PENDING" else . end;
   def ref: {number, url};
   .data.repository as $r
   | if $r.caller == null then empty else
@@ -272,6 +273,10 @@ post() {
           # Rate limited: Discord says how long to wait, in seconds.
           log "message $count: rate limited (attempt $attempt), waiting."
           sleep "$(jq -r '.retry_after // 1 | ceil' "$response" 2>/dev/null || echo 1)"
+          ;;
+        5?? | 000)
+          log "message $count: HTTP $code (attempt $attempt), trying again."
+          sleep 5
           ;;
         *) break ;;
       esac

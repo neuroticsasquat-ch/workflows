@@ -152,6 +152,7 @@ repo "$NS" ns/alpha main yes "$(
     pr 24 updates/dependencies tom/fix tomboone FAILURE
     pr 25 main dependabot/uv/security app/dependabot SUCCESS
     pr 26 updates/dependencies dependabot/npm/d app/dependabot status:ERROR
+    pr 28 updates/dependencies dependabot/npm/e app/dependabot status:EXPECTED
     pr 27 main tom/feature tomboone FAILURE
   } | jq -s .
 )" '[]'
@@ -179,7 +180,7 @@ expect_equal "collect: one report per adopted or unreadable repo, nothing for ga
   "ns/alpha ns/beta ns/broken ns/delta ns/quiet tb/site" "$(jq -r '[.[].repo] | join(" ")' <<<"$COLLECTED")"
 expect_equal "collect: alpha's promotion PR is held for the recorded reasons" '{"number":30,"reasons":["major","outside-window"]}' \
   "$(jq -c '.[] | select(.repo == "ns/alpha") | .held | {number, reasons}' <<<"$COLLECTED")"
-expect_equal "collect: red is Dependabot PRs into the branch with ci red, check run or status" "21 26" \
+expect_equal "collect: red is Dependabot PRs into the branch with ci red, check run or status, not expected" "21 26" \
   "$(jq -r '.[] | select(.repo == "ns/alpha") | [.red[].number] | join(" ")' <<<"$COLLECTED")"
 expect_equal "collect: security is Dependabot PRs into the default branch" "25" \
   "$(jq -r '.[] | select(.repo == "ns/alpha") | [.security[].number] | join(" ")' <<<"$COLLECTED")"
