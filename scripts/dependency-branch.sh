@@ -71,10 +71,12 @@ JQ_DEFS='
     | if . == null then "PENDING"
       else ((.conclusion // "") as $c | if $c != "" then $c else (.state // "PENDING") end) end;
   # The versions a Dependabot commit message says <name> went from and to: "Bumps [name](url)
-  # from A to B", "Updates `name` from A to B" (grouped) or "bump name from A to B" (the subject).
+  # from A to B", "Updates `name` from A to B" (grouped), "bump name from A to B" (the subject),
+  # or "update name requirement from >=A to >=B" (a uv or pip requirement range widened, whose
+  # versions appear only in the subject and keep their operators).
   def version_change($name):
     ($name | gsub("(?<c>[.*+?^${}()|\\[\\]\\\\])"; "\\\(.c)")) as $esc
-    | [match("(?:^|[\\s\\[`])" + $esc + "(?:\\]\\([^)]*\\)|`)? from (?<from>\\S+) to (?<to>\\S+)")] | first
+    | [match("(?:^|[\\s\\[`])" + $esc + "(?:\\]\\([^)]*\\)|`)?(?: requirement)? from (?<from>\\S+) to (?<to>\\S+)")] | first
     | if . == null then null
       else (.captures | map({(.name): .string}) | add)
         | {from: (.from | ltrimstr("v")), to: (.to | rtrimstr(".") | ltrimstr("v"))} end;
@@ -95,7 +97,8 @@ JQ_DEFS='
                 elif ($entry | test("update-type:")) then empty
                 else ($msg | version_change($name)) as $v
                   | if $v == null then "\($name): no update-type, and no from/to versions in the message"
-                    else ([$v.from, $v.to] | map([capture("^(?<m>[0-9]+)")] | first.m)) as $m
+                    else ([$v.from, $v.to]
+                      | map(sub("^[<>=!~^]+"; "") | ltrimstr("v") | [capture("^(?<m>[0-9]+)")] | first.m)) as $m
                       | if $m[0] == null or $m[1] == null or $m[0] != $m[1]
                         then "\($name): no update-type, and \($v.from) to \($v.to) is a major" else empty end
                     end

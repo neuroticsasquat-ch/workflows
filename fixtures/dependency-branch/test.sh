@@ -109,6 +109,35 @@ dependabot_message() {
   echo "Signed-off-by: dependabot[bot] <support@github.com>"
 }
 
+# requirement_message <dependency> <from> <to>: the message Dependabot writes when it widens a
+# requirement range (uv, pip) rather than bumping a pinned version. Copied from a real one: the
+# versions are only in the subject, after the word "requirement" and with their operators, and the
+# metadata carries no update-type.
+requirement_message() {
+  echo "build: update $1 requirement from $2 to $3"
+  echo
+  echo "Updates the requirements on [$1](https://example.com/$1) to permit the latest version."
+  echo "- [Commits](https://example.com/$1/compare/${2#>=}...${3#>=})"
+  printf '\n---\nupdated-dependencies:\n- dependency-name: %s\n  dependency-version: %s\n  dependency-type: direct:production\n...\n' "$1" "${3#>=}"
+  echo
+  echo "Signed-off-by: dependabot[bot] <support@github.com>"
+}
+
+# requirement_merge <name> <from> <to>: a requirement-update PR merged into $BRANCH, as
+# dependabot_merge does. <name> may carry extras (`sentry-sdk[fastapi]`), as the real ones do.
+requirement_merge() {
+  git switch --quiet -c dependabot/req "origin/$BRANCH"
+  echo "$3" >requirements.txt
+  git add requirements.txt
+  git commit --quiet --author 'dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>' \
+    -m "$(requirement_message "$1" "$2" "$3")"
+  git switch --quiet -C deps "origin/$BRANCH"
+  git merge --quiet --no-ff -m "Merge pull request from dependabot/req" dependabot/req
+  git push --quiet origin "HEAD:refs/heads/$BRANCH"
+  git fetch --quiet origin
+  git rev-parse HEAD
+}
+
 # dependabot_merge <file> <content> [<update-type>|none]: a PR branch merged into $BRANCH with a
 # merge commit, the way auto-merge lands one. With an update type, the PR's commit is Dependabot's,
 # with its metadata; without, it's a person's. Prints the merge commit.
@@ -373,6 +402,29 @@ echo '[{"number": 25, "author": {"login": "app/dependabot"}, "autoMergeRequest":
 promotion_pr "$TIP" SUCCESS CLEAN
 run_script --dry-run --auto-promote --now "$INSIDE"
 expect_promotion "promote 30" "(dry run)"
+
+# A requirement update ("update <name> requirement from >=A to >=B") carries no update-type and
+# keeps its versions in the subject, after "requirement" and behind their operators. A minor one
+# promotes: it used to read as "no from/to versions", and so as a major.
+new_case promote-requirement-minor
+TIP=$(requirement_merge 'sentry-sdk[fastapi]' '>=2.73.0' '>=2.74.0')
+echo '[{"number": 25, "author": {"login": "app/dependabot"}, "autoMergeRequest": null, "mergeStateStatus": "BLOCKED",
+  "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": "FAILURE"}]}]' >"$CASE/gh/open.json"
+promotion_pr "$TIP" SUCCESS CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "promote 30" "(dry run)"
+
+# ...and one that crosses a major still holds, naming the versions it read.
+new_case requirement-major
+TIP=$(requirement_merge 'sentry-sdk[fastapi]' '>=2.73.0' '>=3.0.0')
+echo '[{"number": 25, "author": {"login": "app/dependabot"}, "autoMergeRequest": null, "mergeStateStatus": "BLOCKED",
+  "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "conclusion": "FAILURE"}]}]' >"$CASE/gh/open.json"
+promotion_pr "$TIP" SUCCESS CLEAN
+run_script --dry-run --auto-promote --now "$INSIDE"
+expect_promotion "hold 30 major" "(dry run)"
+if [[ $LOG != *"sentry-sdk[fastapi]: no update-type, and >=2.73.0 to >=3.0.0 is a major"* ]]; then
+  fail "requirement-major: the log doesn't name the versions it read:"$'\n'"$LOG"
+fi
 
 # Without --auto-promote nothing is merged, and the window isn't recorded.
 promotion_case opted-out
