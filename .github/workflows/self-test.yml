@@ -91,6 +91,22 @@ jobs:
       build-args: FIXTURE_VERSION=1.2.3
       allow-root: true
 
+  # THROWAWAY: expected to fail the non-root step.
+  neg-root-without-allow-root:
+    uses: ./.github/workflows/image-check.yml
+    with:
+      name: fixture-docker-root
+      context: fixtures/docker
+      target: runtime-root
+      build-args: FIXTURE_VERSION=1.2.3
+
+  # THROWAWAY: expected to fail the smoke step (version stays "dev").
+  neg-smoke-exits-1:
+    uses: ./.github/workflows/image-check.yml
+    with:
+      name: fixture-docker
+      context: fixtures/docker
+
   # The gate self-test: `ci` sees one job that succeeded and one that was
   # skipped, and must pass.
 
