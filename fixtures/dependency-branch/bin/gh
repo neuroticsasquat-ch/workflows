@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# A stand-in for gh, for test.sh. Reads answer from canned JSON in $FAKE_GH_DIR and appends every
+# A stand-in for gh, for test.sh. Reads answer from canned JSON in $FAKE_GH_DIR, in the shape
+# `gh pr list --json` gives (the script's GraphQL query is answered from it), and appends every
 # write to $FAKE_GH_DIR/writes.log, one line per call, the --body value dropped. A --body value is
 # appended to $FAKE_GH_DIR/bodies.log, after a `== <the writes.log line>` header.
 set -euo pipefail
@@ -8,16 +9,38 @@ dir=${FAKE_GH_DIR:?FAKE_GH_DIR is not set}
 args="$*"
 
 case "$1 $2" in
-  "pr list")
-    if [[ $args == *"--state merged"* ]]; then
-      cat "$dir/merged.json"
-    elif [[ $args == *"--head "* ]]; then
-      cat "$dir/promotion.json"
-    elif [[ $args == *"--base main "* ]]; then
+  "api graphql")
+    # Open PRs, from the canned gh-shaped JSON turned into the GraphQL answer.
+    if [[ $args == *checkSuite* ]]; then
+      echo "fake gh: the query asks for checkSuite, which needs Actions: read" >&2
+      exit 1
+    elif [[ $args == *" head="* ]]; then
+      file=$dir/promotion.json
+    elif [[ $args == *" base=main"* ]]; then
       # Security updates: Dependabot PRs into the base.
-      cat "$dir/security.json" 2>/dev/null || echo '[]'
+      file=$dir/security.json
     else
-      cat "$dir/open.json"
+      file=$dir/open.json
+    fi
+    { cat "$file" 2>/dev/null || echo '[]'; } | jq '{data: {repository: {pullRequests: {nodes: [.[] | {
+      number, body, headRefOid, mergeStateStatus, autoMergeRequest,
+      author: (.author.login | if . == null then null
+               elif startswith("app/") then {__typename: "Bot", login: ltrimstr("app/")}
+               else {__typename: "User", login: .} end),
+      commits: {nodes: [.commits[]? | {commit: {oid, messageBody, authors: {nodes: .authors}}}]},
+      head: {nodes: [{commit: {statusCheckRollup:
+        (if (.statusCheckRollup // []) == [] then null else {contexts: {nodes: .statusCheckRollup}} end)}}]}
+    }]}}}}'
+    ;;
+  "pr list")
+    if [[ $args == *statusCheckRollup* ]]; then
+      echo "fake gh: --json statusCheckRollup needs Actions: read; use the script's own query" >&2
+      exit 1
+    elif [[ $args == *"--state merged"* ]]; then
+      cat "$dir/merged.json"
+    else
+      echo "fake gh: unexpected call: gh $args" >&2
+      exit 1
     fi
     ;;
   "pr view")

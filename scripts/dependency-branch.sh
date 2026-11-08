@@ -112,6 +112,42 @@ write() {
   "$@"
 }
 
+# Open PRs into $1, or only from head $2 when given, in the shape `gh pr list --json` gives them.
+# The query is written out rather than left to `gh pr list --json statusCheckRollup`, because
+# gh's own rollup query asks for checkSuite.workflowRun, which needs the Actions: read permission
+# the app doesn't have (it fails with "Resource not accessible by integration").
+# shellcheck disable=SC2016 # GraphQL variables, not shell ones.
+PR_QUERY='
+query($owner: String!, $name: String!, $base: String!, $head: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(baseRefName: $base, headRefName: $head, states: OPEN, first: 100) {
+      nodes {
+        number body headRefOid mergeStateStatus
+        author { __typename login }
+        autoMergeRequest { enabledAt }
+        commits(last: 100) { nodes { commit { oid messageBody authors(first: 10) { nodes { name } } } } }
+        head: commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+          __typename
+          ... on CheckRun { name status conclusion }
+          ... on StatusContext { context state }
+        } } } } } }
+      }
+    }
+  }
+}'
+open_prs_into() {
+  local args=(-H 'Accept: application/vnd.github.merge-info-preview+json' -f query="$PR_QUERY"
+    -F owner='{owner}' -F name='{repo}' -f base="$1")
+  if [[ -n ${2:-} ]]; then args+=(-f head="$2"); fi
+  # gh shows a bot author as app/<login>.
+  gh api graphql "${args[@]}" | jq '[.data.repository.pullRequests.nodes[] | {
+    number, body, headRefOid, mergeStateStatus, autoMergeRequest,
+    author: {login: (if .author.__typename == "Bot" then "app/\(.author.login)" else .author.login end)},
+    commits: [.commits.nodes[].commit | {oid, messageBody, authors: .authors.nodes}],
+    statusCheckRollup: (.head.nodes[0].commit.statusCheckRollup.contexts.nodes // [])
+  }]'
+}
+
 # Adds a hold reason to $reasons, a space-separated list.
 hold_reason() { reasons="${reasons:+$reasons }$1"; }
 
@@ -198,8 +234,7 @@ fi
 
 # --- 2. Auto-merge Dependabot PRs into the branch -----------------------------
 
-open_prs=$(gh pr list --base "$BRANCH" --state open --limit 100 \
-  --json number,author,autoMergeRequest,mergeStateStatus,statusCheckRollup)
+open_prs=$(open_prs_into "$BRANCH")
 while IFS=$'\t' read -r number merge_state ci; do
   [[ -n $number ]] || continue
   case $ci in
@@ -226,8 +261,7 @@ done < <(jq -r --arg bot "$DEPENDABOT" "$JQ_DEFS"'
 
 # --- 3. Promotion PR, with step 4's decision ---------------------------------------
 
-promotion=$(gh pr list --base "$BASE" --head "$BRANCH" --state open --limit 1 \
-  --json number,body,headRefOid,mergeStateStatus,statusCheckRollup)
+promotion=$(open_prs_into "$BASE" "$BRANCH")
 promotion_number=$(jq -r '.[0].number // empty' <<<"$promotion")
 # Step 4's hold reasons, decided here so the body written below carries them.
 reasons=
@@ -371,8 +405,7 @@ fi
 # --- 5. Security updates ---------------------------------------------------------
 
 # Dependabot ignores target-branch for security updates, so they are PRs into the base.
-security_prs=$(gh pr list --base "$BASE" --state open --limit 100 \
-  --json number,author,commits,statusCheckRollup)
+security_prs=$(open_prs_into "$BASE")
 while IFS=$'\t' read -r number ci why; do
   [[ -n $number ]] || continue
   reasons=
