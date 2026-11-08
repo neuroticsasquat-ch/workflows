@@ -159,6 +159,47 @@ The repo contract:
   an image ships. The versions come from these files, so no workflow names one.
 - pnpm only: there is no npm or Yarn path.
 
+## `image-check.yml`
+
+The PR check for every repo whose image ships (GHCR-published or
+Coolify-built). It builds the image without pushing, checks that it doesn't
+run as root, and runs the repo's smoke test against it. Publishing is
+`image-publish.yml`'s job. Dev-only Dockerfiles don't call it.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `name` | repo name | The local tag is `<name>:ci` and the GHA cache scope is `<name>`. Lowercased. |
+| `context` | `.` | Build context. |
+| `file` | `<context>/Dockerfile` | Dockerfile path, such as `Dockerfile.prod`. |
+| `target` | `""` | Stage to build; empty means the last stage. |
+| `platforms` | `linux/amd64` | The platform to build for. One only: the image is loaded into the runner's Docker. |
+| `build-args` | `""` | Multiline `KEY=value`. |
+| `allow-root` | `false` | Skip the non-root check. |
+
+Setup, in order: checkout; `docker/setup-buildx-action`;
+`docker/build-push-action` with `push: false`, `load: true`, the tag
+`<name>:ci` and the cache `type=gha,scope=<name>` (`mode=max`). Then the
+checks, each of which runs once the build has succeeded, even after an earlier
+check failed:
+
+- `docker run --rm --entrypoint id <name>:ci -u` must print something other
+  than `0`. The image needs an `id` binary for this.
+- `.github/ci/smoke.sh`, if it exists, run with bash from the build context
+  with `<name>:ci` as `$1`. Like the other convention files, it is looked up in
+  `.github/ci/` under the build context first, then at the repo root.
+
+The repo contract:
+
+- The image runs as a non-root user: a `USER` line in the Dockerfile. An image
+  that genuinely has to run as root (a volume-permission case found during
+  adoption) passes `allow-root: true`, with a comment at the call saying why.
+  It is not a default.
+- Optionally `.github/ci/smoke.sh`: it receives the image tag as `$1`, runs the
+  image (a CLI `--help`, an import, a health endpoint) and exits non-zero on
+  failure.
+- A repo with several images calls the workflow from a `strategy.matrix`, one
+  `name` per image.
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
@@ -172,6 +213,13 @@ reusable workflow has a job there that calls it by local path
 | `python-plain-ty` | `fixtures/python-plain` | `typechecker: ty` |
 | `python-postgres-alembic` | `fixtures/python-postgres-alembic` | `postgres: "17"`, `.github/ci/env` and `setup.sh`, the Alembic checks |
 | `js-pnpm` | `fixtures/js-pnpm` | pnpm and Node from `packageManager` and `.node-version`; oxlint, `tsc -b`, vitest, `vite build` |
+| `image-docker` | `fixtures/docker` | the last stage, which runs as a non-root user; `build-args`; `.github/ci/smoke.sh` runs the image's CLI |
+| `image-docker-allow-root` | `fixtures/docker` | `file`, `target: runtime-root` (no `USER` line), `allow-root: true` |
+
+A job that calls a reusable workflow can't take `continue-on-error`, so the
+failing cases (a root image without `allow-root`, a smoke script that exits 1)
+aren't in the harness. They are checked on a throwaway PR when the workflow
+changes.
 
 The harness also holds the gate self-test, which checks `actions/gate` on
 success, skipped, failed and cancelled jobs. Everything ends in a job named

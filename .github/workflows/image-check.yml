@@ -1,0 +1,132 @@
+# PR check for a repo's image: build it without pushing, check that it doesn't
+# run as root, and run the repo's smoke test against it. Publishing is
+# image-publish.yml's job. The inputs and the repo contract are in the README.
+name: image-check
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: The local tag is <name>:ci, and the GHA cache scope is <name>. Empty means the repo name.
+        type: string
+        default: ""
+      context:
+        description: Build context.
+        type: string
+        default: "."
+      file:
+        description: Dockerfile path. Empty means <context>/Dockerfile.
+        type: string
+        default: ""
+      target:
+        description: Stage to build. Empty means the last stage.
+        type: string
+        default: ""
+      platforms:
+        description: >-
+          The platform to build for. One only: the image is loaded into the
+          runner's Docker, which holds a single platform.
+        type: string
+        default: linux/amd64
+      build-args:
+        description: Multiline KEY=value build args.
+        type: string
+        default: ""
+      allow-root:
+        description: >-
+          Skip the non-root check. Only for an image that genuinely has to run
+          as root; say why in a comment where you pass it.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # --- Build. A failure here skips every check. --------------------------
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the tag
+        id: name
+        env:
+          NAME: ${{ inputs.name || github.event.repository.name }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          if [[ $PLATFORMS == *,* ]]; then
+            echo "::error title=image-check::platforms must name one platform, got '$PLATFORMS'. A multi-platform build can't be loaded into the runner's Docker."
+            exit 1
+          fi
+          # Docker repository names are lowercase.
+          name=${NAME,,}
+          echo "Tag $name:ci, cache scope $name"
+          echo "tag=$name:ci" >> "$GITHUB_OUTPUT"
+          echo "scope=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build the image (no push)
+        id: build
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file || format('{0}/Dockerfile', inputs.context) }}
+          target: ${{ inputs.target }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ inputs.build-args }}
+          push: false
+          load: true
+          tags: ${{ steps.name.outputs.tag }}
+          cache-from: type=gha,scope=${{ steps.name.outputs.scope }}
+          cache-to: type=gha,scope=${{ steps.name.outputs.scope }},mode=max
+
+      # --- Checks. Each runs once the build succeeded, even after an earlier
+      # check failed; the job fails if any of them did.
+      - name: The image doesn't run as root
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+          ALLOW_ROOT: ${{ inputs.allow-root }}
+        run: |
+          if [[ $ALLOW_ROOT == true ]]; then
+            echo "::notice title=image-check::Non-root check skipped for $TAG: the caller passes allow-root: true."
+            exit 0
+          fi
+          if ! uid=$(docker run --rm --entrypoint id "$TAG" -u); then
+            echo "::error title=image-check::Couldn't run 'id -u' in $TAG. The non-root check needs an id binary in the image."
+            exit 1
+          fi
+          echo "$TAG runs as uid $uid"
+          if [[ $uid == 0 ]]; then
+            echo "::error title=image-check::$TAG runs as root (uid 0). Add a USER line to the Dockerfile. If the image genuinely has to run as root, pass allow-root: true with a comment saying why."
+            exit 1
+          fi
+
+      # Looked up in .github/ci/ under the build context first, then at the repo
+      # root, the same way python.yml finds its convention files.
+      - name: Run .github/ci/smoke.sh
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: ${{ inputs.context }}
+        env:
+          TAG: ${{ steps.name.outputs.tag }}
+        run: |
+          smoke=""
+          for candidate in .github/ci/smoke.sh "$GITHUB_WORKSPACE/.github/ci/smoke.sh"; do
+            if [[ -f $candidate ]]; then
+              smoke=$(realpath "$candidate")
+              break
+            fi
+          done
+          if [[ -z $smoke ]]; then
+            echo "No .github/ci/smoke.sh"
+            exit 0
+          fi
+          echo "Running $smoke $TAG"
+          bash "$smoke" "$TAG"

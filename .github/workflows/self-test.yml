@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh fixtures/*/.github/ci/*.sh
+        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh fixtures/*/*.sh fixtures/*/.github/ci/*.sh
       - name: Ruleset bodies are valid JSON
         run: |
           for file in rulesets/*.json; do
@@ -68,6 +68,28 @@ jobs:
     uses: ./.github/workflows/js.yml
     with:
       working-directory: fixtures/js-pnpm
+
+  # The default (last) stage runs as a non-root user and passes the smoke test.
+  image-docker:
+    uses: ./.github/workflows/image-check.yml
+    with:
+      name: fixture-docker
+      context: fixtures/docker
+      build-args: FIXTURE_VERSION=1.2.3
+
+  # The same image without its USER line, which allow-root lets through. A job
+  # that calls a reusable workflow can't take continue-on-error, so the failing
+  # cases (root image without allow-root, a smoke script that exits 1) can't
+  # live here without turning the run red. They are checked on a throwaway PR.
+  image-docker-allow-root:
+    uses: ./.github/workflows/image-check.yml
+    with:
+      name: fixture-docker-root
+      context: fixtures/docker
+      file: fixtures/docker/Dockerfile
+      target: runtime-root
+      build-args: FIXTURE_VERSION=1.2.3
+      allow-root: true
 
   # The gate self-test: `ci` sees one job that succeeded and one that was
   # skipped, and must pass.
@@ -136,6 +158,8 @@ jobs:
       - python-plain-ty
       - python-postgres-alembic
       - js-pnpm
+      - image-docker
+      - image-docker-allow-root
       - gate-input-success
       - gate-input-skipped
       - gate-cases
