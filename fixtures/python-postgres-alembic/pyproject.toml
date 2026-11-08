@@ -1,0 +1,18 @@
+# Fixture for python.yml with postgres: "17" and Alembic. .github/ci/env points
+# the app at the service, .github/ci/setup.sh creates the `app` schema, and the
+# one migration matches models.py.
+[project]
+name = "python-postgres-alembic"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = ["alembic>=1.20.1", "psycopg[binary]>=3.3.8", "sqlalchemy>=2.1.8"]
+
+[dependency-groups]
+dev = ["pyright>=1.1.414", "pytest>=9.2.0", "ruff>=0.17.4"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

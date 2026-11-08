@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh
+        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh fixtures/*/.github/ci/*.sh
       - name: Ruleset bodies are valid JSON
         run: |
           for file in rulesets/*.json; do
@@ -45,15 +45,27 @@ jobs:
 
   # --- Fixture harness -------------------------------------------------------
   # Each reusable workflow is called here by local path, against a small project
-  # under fixtures/, and every such job is listed in `ci`'s needs:
-  #
-  #   python-plain:
-  #     uses: ./.github/workflows/python.yml
-  #     with:
-  #       working-directory: fixtures/python-plain
-  #
-  # The gate self-test below seeds it: `ci` sees one job that succeeded and one
-  # that was skipped, and must pass.
+  # under fixtures/, and every such job is listed in `ci`'s needs.
+
+  python-plain:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/python-plain
+
+  python-plain-ty:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/python-plain
+      typechecker: ty
+
+  python-postgres-alembic:
+    uses: ./.github/workflows/python.yml
+    with:
+      working-directory: fixtures/python-postgres-alembic
+      postgres: "17"
+
+  # The gate self-test: `ci` sees one job that succeeded and one that was
+  # skipped, and must pass.
 
   gate-input-success:
     runs-on: ubuntu-latest
@@ -112,7 +124,15 @@ jobs:
   # The only required check. List every other job in needs.
   ci:
     if: always()
-    needs: [actionlint, scripts, gate-input-success, gate-input-skipped, gate-cases]
+    needs:
+      - actionlint
+      - scripts
+      - python-plain
+      - python-plain-ty
+      - python-postgres-alembic
+      - gate-input-success
+      - gate-input-skipped
+      - gate-cases
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1

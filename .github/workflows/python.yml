@@ -1,0 +1,169 @@
+# CI for a uv-managed Python project: install from the lock, then lint, format,
+# typecheck, the Alembic checks (when Alembic is used) and pytest. Repo
+# specifics live in the project's tool config, not here; this runs bare
+# commands. The repo contract is in the README.
+name: python
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Where pyproject.toml, uv.lock and .python-version live.
+        type: string
+        default: "."
+      postgres:
+        description: >-
+          Postgres major to run as a service ("16", "17", "18"); empty means no
+          service. Credentials root/root, database postgres, localhost:5432.
+        type: string
+        default: ""
+      typechecker:
+        description: pyright or ty.
+        type: string
+        default: pyright
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    services:
+      # An empty image means the service isn't started, so one job serves
+      # callers with and without a database.
+      postgres:
+        image: ${{ inputs.postgres != '' && format('postgres:{0}', inputs.postgres) || '' }}
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U root -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      # --- Install and setup. A failure here skips every check. -------------
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # Python comes from .python-version: uv reads it when it syncs.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # The CI convention files live in .github/ci/ in the working directory,
+      # or at the repo root when the working directory has none.
+      - name: Load .github/ci/env
+        id: ci-files
+        run: |
+          ci_dir=""
+          for dir in .github/ci "$GITHUB_WORKSPACE/.github/ci"; do
+            if [[ -d $dir ]]; then
+              ci_dir=$(cd "$dir" && pwd)
+              break
+            fi
+          done
+          echo "dir=$ci_dir" >> "$GITHUB_OUTPUT"
+
+          env_file="$ci_dir/env"
+          if [[ -z $ci_dir || ! -f $env_file ]]; then
+            echo "No .github/ci/env"
+            exit 0
+          fi
+          echo "Loading $env_file"
+          line_no=0
+          while IFS= read -r line || [[ -n $line ]]; do
+            line_no=$((line_no + 1))
+            line=${line%$'\r'}
+            [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+            line=${line#export }
+            if [[ ! $line =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+              echo "::error file=$env_file,line=$line_no::not a NAME=value line"
+              exit 1
+            fi
+            name=${BASH_REMATCH[1]}
+            value=${BASH_REMATCH[2]}
+            if [[ $value =~ ^\"(.*)\"$ || $value =~ ^\'(.*)\'$ ]]; then
+              value=${BASH_REMATCH[1]}
+            fi
+            echo "$name=$value" >> "$GITHUB_ENV"
+            echo "  $name"
+          done < "$env_file"
+
+      - run: uv sync --locked
+
+      - name: Detect Alembic
+        id: detect
+        run: |
+          if [[ -f alembic.ini ]] || grep -q '^\[tool\.alembic\]' pyproject.toml; then
+            echo "alembic=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "alembic=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The last setup step: every check runs only if this one succeeded.
+      - name: Run .github/ci/setup.sh
+        id: setup
+        env:
+          CI_DIR: ${{ steps.ci-files.outputs.dir }}
+        run: |
+          if [[ -n $CI_DIR && -f $CI_DIR/setup.sh ]]; then
+            bash "$CI_DIR/setup.sh"
+          else
+            echo "No .github/ci/setup.sh"
+          fi
+
+      # --- Checks. Each runs once setup succeeded, even after an earlier check
+      # failed; the job fails if any of them did.
+      - name: ruff check
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: uv run ruff check
+
+      - name: ruff format --check
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: uv run ruff format --check
+
+      - name: ${{ inputs.typechecker }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          TYPECHECKER: ${{ inputs.typechecker }}
+        run: |
+          case $TYPECHECKER in
+            pyright) uv run pyright ;;
+            ty) uv run ty check ;;
+            *)
+              echo "::error title=typechecker::must be pyright or ty, got '$TYPECHECKER'"
+              exit 1
+              ;;
+          esac
+
+      - name: Alembic has a single head
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.detect.outputs.alembic == 'true' }}
+        run: |
+          heads=$(uv run alembic heads)
+          echo "$heads"
+          count=$(grep -c '(head)' <<< "$heads" || true)
+          if (( count > 1 )); then
+            echo "::error title=alembic::$count heads; merge them into one (alembic merge heads)"
+            exit 1
+          fi
+
+      - name: Alembic migrations match the models
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.detect.outputs.alembic == 'true' }}
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: pytest
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: uv run pytest
