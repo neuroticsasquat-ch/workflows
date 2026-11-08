@@ -93,9 +93,10 @@ reports as `<caller> / <called>` (`ci / gate`), and the rulesets require exactly
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
-`.github/workflows/`, shellcheck over the scripts, and the fixture harness: each
-reusable workflow called by local path (`./.github/workflows/<name>.yml`)
-against a project in `fixtures/`. The gate self-test checks `actions/gate` on
+`.github/workflows/`, shellcheck over the scripts, and the fixture harness. As
+the reusable workflows land, each one gets a job there that calls it by local
+path (`./.github/workflows/<name>.yml`) against a project in `fixtures/`. For
+now the harness holds the gate self-test, which checks `actions/gate` on
 success, skipped, failed and cancelled jobs. Everything ends in a job named
 `ci`, decided by `./actions/gate`, the only required check.
 
