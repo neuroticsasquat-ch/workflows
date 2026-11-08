@@ -32,7 +32,7 @@ The decision record is ADR-0005 in the ops repo
 
 | Path | Holds |
 |---|---|
-| `.github/workflows/` | the reusable workflows (`on: workflow_call`) and `self-test.yml`, this repo's own CI |
+| `.github/workflows/` | the reusable workflows (`on: workflow_call`), `self-test.yml` (this repo's own CI) and `digest.yml` (the Saturday dependency digest) |
 | `actions/` | composite actions used by the workflows |
 | `rulesets/` | the ruleset bodies (JSON), the single definition |
 | `scripts/` | tooling, such as applying the rulesets |
@@ -387,6 +387,55 @@ jobs:
   `AUTOMATION_APP_PRIVATE_KEY` secret and the rulesets: the repo contract in
   the ops project spec.
 
+## `digest.yml`
+
+The Saturday dependency digest. It runs in this repo, not in callers, and
+posts one message to Discord `#dependencies` at 18:30 America/New_York, after
+the promotion window closes. Discord is the only alert channel (ADR-0002 in the
+ops repo), and `#dependencies` can be muted on its own. The digest only reads.
+It never acts on a repo.
+
+It acts as the automation app, minting one token per installation
+(`neuroticsasquat-ch` and `tomboone`). It lists every unarchived repo the app
+is installed on that has `.github/workflows/dependencies.yml` (the
+`dependency-branch.yml` caller) and makes one GraphQL query per repo. Each
+repo gets a line when it has any of these:
+
+| | Shows |
+|---|---|
+| 🟢 promoted | the promotion PR (`updates/dependencies` into the default branch) merged today, New York time |
+| 🟡 held | the open promotion PR and its reasons, read from the `<!-- dependency-branch:hold … -->` marker (`no hold recorded` when it has none) |
+| 🔴 red | open Dependabot PRs into `updates/dependencies` whose `ci` finished with anything but success |
+| 🟡 security | open Dependabot PRs into the default branch |
+| ⚠️ | a repo whose query failed, so it isn't silently missing |
+
+The icon is the worst of the line's entries. Lines are sorted worst first, and
+the repos with nothing to report collapse into a count on the last line, so
+every adopted repo appears exactly once. A digest too long for Discord's limits
+(4096 characters an embed, 6000 and 10 embeds a message) is split over several
+messages.
+
+GitHub's cron runs in UTC, so there are two: `30 22 * * 6` (18:30 EDT) and
+`30 23 * * 6` (18:30 EST). Each run passes the cron that fired to
+`scripts/digest.sh due`. That prints `true` only when the time the cron was due,
+not the time the run started, is Saturday 18:30 in New York, so exactly one of
+them posts each Saturday, across DST changes and late starts. GitHub turns off
+scheduled workflows in a public repo after 60 days with no activity and says
+so by email. Re-enable *digest* in the Actions tab if a quiet stretch stops it.
+
+It needs the org secret `AUTOMATION_APP_PRIVATE_KEY` and the repo secret
+`DISCORD_DEPENDENCIES_WEBHOOK`. Run it by hand from the Actions tab
+(*digest* → *Run workflow*). A run by hand always posts. Tick `dry-run` to
+write the digest to the run summary only. The script's steps also run on their
+own:
+
+```sh
+scripts/digest.sh due --schedule "30 23 * * 6" [--now 2026-11-07T23:30:00Z]
+GH_TOKEN=<installation token> scripts/digest.sh collect >ns.json
+scripts/digest.sh render [--now <instant>] ns.json tb.json >payloads.jsonl
+DISCORD_WEBHOOK=<url> scripts/digest.sh post <payloads.jsonl
+```
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
@@ -413,6 +462,13 @@ check the action list: behind only, ahead and behind merging cleanly, and
 ahead and behind conflicting. Real runs then check that the clean merge lands
 on the remote, the conflict leaves it alone, and the conflict comment isn't
 repeated.
+
+`digest.yml` needs the app's key and the webhook, so it isn't called here
+either. The `digest` job runs `fixtures/digest/test.sh` instead. It checks the
+zone check on both crons for every Saturday of 2026, including late starts. It
+runs `collect` against canned GitHub answers (`fixtures/digest/bin/gh`),
+renders the exact digest, splits a long one within Discord's limits, and posts
+through a stand-in `curl` that rate-limits once.
 
 A job that calls a reusable workflow can't take `continue-on-error`, so the
 failing cases (a root image without `allow-root`, a smoke script that exits 1)

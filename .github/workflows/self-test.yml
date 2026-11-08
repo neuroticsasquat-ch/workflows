@@ -53,6 +53,16 @@ jobs:
           persist-credentials: false
       - run: fixtures/dependency-branch/test.sh
 
+  # digest.yml's steps: the zone check across DST, collect against a stand-in gh,
+  # render (splitting included) and post against a stand-in curl.
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: fixtures/digest/test.sh
+
   # --- Fixture harness -------------------------------------------------------
   # Each reusable workflow is called here by local path, against a small project
   # under fixtures/, and every such job is listed in `ci`'s needs.
@@ -165,6 +175,7 @@ jobs:
       - actionlint
       - scripts
       - dependency-branch
+      - digest
       - python-plain
       - python-plain-ty
       - python-postgres-alembic

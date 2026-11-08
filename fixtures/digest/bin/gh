@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# A stand-in for gh, for test.sh. Answers the two reads digest.sh collect makes from canned JSON in
+# $FAKE_GH_DIR: the installation's repos from repositories.json, and each repo's GraphQL answer
+# from repos/<owner>_<name>.json. A repo with repos/<owner>_<name>.error instead fails, with that
+# file's text on stderr. Every graphql call is appended to $FAKE_GH_DIR/queried.log as owner/name.
+set -euo pipefail
+
+dir=${FAKE_GH_DIR:?FAKE_GH_DIR is not set}
+args="$*"
+
+case "$1 $2" in
+  "api installation/repositories")
+    cat "$dir/repositories.json"
+    ;;
+  "api graphql")
+    if [[ $args == *checkSuite* ]]; then
+      echo "fake gh: the query asks for checkSuite, which needs Actions: read" >&2
+      exit 1
+    fi
+    owner='' name=''
+    shift 2
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        -f | -F)
+          case $2 in
+            owner=*) owner=${2#owner=} ;;
+            name=*) name=${2#name=} ;;
+          esac
+          shift 2
+          ;;
+        *) shift ;;
+      esac
+    done
+    echo "$owner/$name" >>"$dir/queried.log"
+    if [[ -f $dir/repos/${owner}_$name.json ]]; then
+      cat "$dir/repos/${owner}_$name.json"
+    elif [[ -f $dir/repos/${owner}_$name.error ]]; then
+      cat "$dir/repos/${owner}_$name.error" >&2
+      exit 1
+    else
+      echo "fake gh: no canned answer for $owner/$name" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "fake gh: unexpected call: gh $args" >&2
+    exit 1
+    ;;
+esac
