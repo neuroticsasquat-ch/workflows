@@ -90,13 +90,59 @@ jobs:
 reports as `<caller> / <called>` (`ci / gate`), and the rulesets require exactly
 `ci`. That's why the gate is a composite action and not a reusable workflow.
 
+## `python.yml`
+
+CI for a uv-managed Python project. Repo specifics (lint and typecheck paths,
+pytest options, markers) live in the project's tool config; the workflow runs
+bare commands.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `working-directory` | `.` | Where `pyproject.toml`, `uv.lock` and `.python-version` live. |
+| `postgres` | `""` | Postgres major to run as a service (`"16"`, `"17"`, `"18"`); empty means no service. Credentials `root`/`root`, database `postgres`, `localhost:5432`. |
+| `typechecker` | `pyright` | `pyright` or `ty`. |
+
+Setup, in order: checkout; `setup-uv` (cache keyed on that `uv.lock`); load
+`.github/ci/env`; `uv sync --locked` (the `dev` group installs by default);
+run `.github/ci/setup.sh`. Then the checks, each of which runs once setup has
+succeeded, even after an earlier check failed:
+
+- `uv run ruff check`
+- `uv run ruff format --check`
+- `uv run pyright`, or `uv run ty check`
+- if `alembic.ini` is in the working directory or `pyproject.toml` has
+  `[tool.alembic]`: a single-head check, then
+  `uv run alembic upgrade head` and `uv run alembic check`
+- `uv run pytest`
+
+The repo contract:
+
+- `pyproject.toml` with the dev tools in the `dev` dependency group, `uv.lock`,
+  and `.python-version`, matching the Dockerfile's `FROM`. uv installs Python
+  from `.python-version`, so no workflow names a version. Non-package apps set
+  `tool.uv.package = false`.
+- Optional CI convention files. Each is looked up in `.github/ci/` under the
+  working directory first, then in `.github/ci/` at the repo root:
+  - `env`: dotenv lines (`NAME=value`, optionally quoted, `#` comments)
+    loaded into the job's environment. Test-only values, never secrets.
+  - `setup.sh`: run with bash from the working directory after install and
+    before the checks. It creates databases, schemas and extensions, loads
+    fixtures, and starts extra services with `docker run`.
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
-`.github/workflows/`, shellcheck over the scripts, and the fixture harness. As
-the reusable workflows land, each one gets a job there that calls it by local
-path (`./.github/workflows/<name>.yml`) against a project in `fixtures/`. For
-now the harness holds the gate self-test, which checks `actions/gate` on
+`.github/workflows/`, shellcheck over the scripts, and the fixture harness. Each
+reusable workflow has a job there that calls it by local path
+(`./.github/workflows/<name>.yml`) against a project in `fixtures/`:
+
+| Job | Fixture | Covers |
+|---|---|---|
+| `python-plain` | `fixtures/python-plain` | no database, pyright |
+| `python-plain-ty` | `fixtures/python-plain` | `typechecker: ty` |
+| `python-postgres-alembic` | `fixtures/python-postgres-alembic` | `postgres: "17"`, `.github/ci/env` and `setup.sh`, the Alembic checks |
+
+The harness also holds the gate self-test, which checks `actions/gate` on
 success, skipped, failed and cancelled jobs. Everything ends in a job named
 `ci`, decided by `./actions/gate`, the only required check.
 
