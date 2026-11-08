@@ -36,22 +36,88 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck --version && shellcheck scripts/*.sh
+        run: shellcheck --version && shellcheck scripts/*.sh actions/*/*.sh
       - name: Ruleset bodies are valid JSON
         run: |
           for file in rulesets/*.json; do
             jq -e . "$file" >/dev/null || { echo "::error file=$file::not valid JSON"; exit 1; }
           done
 
-  ci:
-    if: always()
-    needs: [actionlint, scripts]
+  # --- Fixture harness -------------------------------------------------------
+  # Each reusable workflow is called here by local path, against a small project
+  # under fixtures/, and every such job is listed in `ci`'s needs:
+  #
+  #   python-plain:
+  #     uses: ./.github/workflows/python.yml
+  #     with:
+  #       working-directory: fixtures/python-plain
+  #
+  # The gate self-test below seeds it: `ci` sees one job that succeeded and one
+  # that was skipped, and must pass.
+
+  gate-input-success:
     runs-on: ubuntu-latest
     steps:
-      - name: Fail unless every needed job succeeded
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
-        run: |
-          echo "needs: ${NEEDS}"
-          exit 1
+      - run: echo "succeeds, so ci sees success"
+
+  gate-input-skipped:
+    # Never true. actionlint rejects a constant `if: false`.
+    if: github.run_id == 0
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "never runs, so ci sees skipped"
+
+  # The gate decides each kind of result correctly. Every leg runs the gate over
+  # a made-up `needs`. The gate step may fail (on purpose, in most legs), and the
+  # step after it asserts which way it went.
+  gate-cases:
+    name: gate-cases (${{ matrix.case }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: failure
+            needs: '{"build":{"result":"success","outputs":{}},"test":{"result":"failure","outputs":{}}}'
+            expect: failure
+          - case: cancelled
+            needs: '{"build":{"result":"cancelled","outputs":{}}}'
+            expect: failure
+          # toJSON(needs.build) instead of toJSON(needs): no entry has a result.
+          - case: not-the-needs-object
+            needs: '{"result":"success","outputs":{}}'
+            expect: failure
+          - case: success-and-skipped
+            needs: '{"build":{"result":"success","outputs":{}},"image":{"result":"skipped","outputs":{}}}'
+            expect: success
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - id: gate
+        uses: ./actions/gate
+        continue-on-error: true
+        with:
+          needs: ${{ matrix.needs }}
+      - name: Gate finished as ${{ matrix.expect }}
         env:
-          NEEDS: ${{ toJSON(needs) }}
+          OUTCOME: ${{ steps.gate.outcome }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          if [[ $OUTCOME != "$EXPECT" ]]; then
+            echo "::error title=gate-cases::the gate finished as $OUTCOME, expected $EXPECT"
+            exit 1
+          fi
+
+  # The only required check. List every other job in needs.
+  ci:
+    if: always()
+    needs: [actionlint, scripts, gate-input-success, gate-input-skipped, gate-cases]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/gate
+        with:
+          needs: ${{ toJSON(needs) }}

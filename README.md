@@ -65,10 +65,40 @@ re-running the script, not in the GitHub UI. In the bodies, `integration_id`
 *Grouped security updates* has no API, so `--repo` prints the settings link to
 turn it on by hand.
 
+## The `ci` gate
+
+Every repo exposes one required check, `ci`, and `actions/gate` decides it. The
+gate fails if any job in `needs` failed or was cancelled; `success` and
+`skipped` pass, so path-filtered jobs that didn't run don't block a PR. It
+prints a job → result table to the log and the step summary.
+
+```yaml
+jobs:
+  python:
+    uses: neuroticsasquat-ch/workflows/.github/workflows/python.yml@v1
+  ci:                       # the one required check; the name is the contract
+    if: always()
+    needs: [python]         # every other job
+    runs-on: ubuntu-latest
+    steps:
+      - uses: neuroticsasquat-ch/workflows/actions/gate@v1
+        with:
+          needs: ${{ toJSON(needs) }}
+```
+
+`ci` has to be a plain job like this one. A job that calls a reusable workflow
+reports as `<caller> / <called>` (`ci / gate`), and the rulesets require exactly
+`ci`. That's why the gate is a composite action and not a reusable workflow.
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
-`.github/workflows/` and ends in a job named `ci`, the only required check.
+`.github/workflows/`, shellcheck over the scripts, and the fixture harness. As
+the reusable workflows land, each one gets a job there that calls it by local
+path (`./.github/workflows/<name>.yml`) against a project in `fixtures/`. For
+now the harness holds the gate self-test, which checks `actions/gate` on
+success, skipped, failed and cancelled jobs. Everything ends in a job named
+`ci`, decided by `./actions/gate`, the only required check.
 
 The actions used inside the workflows are pinned to exact versions. Dependabot
 bumps them weekly into `updates/dependencies`.

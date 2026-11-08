@@ -1,0 +1,32 @@
+name: gate
+description: >-
+  Decides a repo's aggregate `ci` check. Fails if any needed job failed or was
+  cancelled; `success` and `skipped` pass. Prints a job -> result table.
+
+# Use it from a plain job named `ci`, never from a reusable-workflow call: a call
+# reports as `<caller> / <called>`, and the rulesets require exactly `ci`.
+#
+#   ci:
+#     if: always()
+#     needs: [python, image]   # every other job
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: neuroticsasquat-ch/workflows/actions/gate@v1
+#         with:
+#           needs: ${{ toJSON(needs) }}
+
+inputs:
+  needs:
+    description: The calling job's `needs` context, as `toJSON(needs)`.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check needed jobs
+      shell: bash
+      # Passed through env, not interpolated into the script, so no job name or
+      # output can inject shell.
+      env:
+        NEEDS: ${{ inputs.needs }}
+      run: bash "$GITHUB_ACTION_PATH/gate.sh" "$NEEDS"
