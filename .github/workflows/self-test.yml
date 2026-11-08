@@ -64,6 +64,11 @@ jobs:
       working-directory: fixtures/python-postgres-alembic
       postgres: "17"
 
+  js-pnpm:
+    uses: ./.github/workflows/js.yml
+    with:
+      working-directory: fixtures/js-pnpm
+
   # The gate self-test: `ci` sees one job that succeeded and one that was
   # skipped, and must pass.
 
@@ -130,6 +135,7 @@ jobs:
       - python-plain
       - python-plain-ty
       - python-postgres-alembic
+      - js-pnpm
       - gate-input-success
       - gate-input-skipped
       - gate-cases
