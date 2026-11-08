@@ -129,6 +129,36 @@ The repo contract:
     before the checks. It creates databases, schemas and extensions, loads
     fixtures, and starts extra services with `docker run`.
 
+## `js.yml`
+
+CI for a pnpm-managed JS or TypeScript project. What each check runs is set by
+the project's package scripts; the workflow only runs them.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `working-directory` | `.` | Where `package.json`, `pnpm-lock.yaml` and `.node-version` live. |
+
+Setup, in order: checkout; `pnpm/action-setup` (pnpm from `packageManager`);
+`setup-node` (Node from `.node-version`, pnpm cache keyed on that
+`pnpm-lock.yaml`); a check that `package.json` defines all four required
+scripts, failing with an error that names any missing one;
+`pnpm install --frozen-lockfile`. Then the checks, each of which runs once
+install has succeeded, even after an earlier check failed:
+
+- `pnpm run lint`
+- `pnpm run typecheck`
+- `pnpm run test`
+- `pnpm run build`
+
+The repo contract:
+
+- `package.json` with `packageManager: pnpm@<version>` and the scripts `lint`
+  (oxlint, failing on warnings: `oxlint --max-warnings 0`), `typecheck`, `test`
+  and `build`. A plain-JS repo still defines all four, with real commands.
+- `pnpm-lock.yaml`, and `.node-version` matching the Dockerfile's `FROM` where
+  an image ships. The versions come from these files, so no workflow names one.
+- pnpm only: there is no npm or Yarn path.
+
 ## This repo's own CI
 
 `self-test.yml` runs on every PR and on push to `main`. It runs actionlint over
@@ -141,6 +171,7 @@ reusable workflow has a job there that calls it by local path
 | `python-plain` | `fixtures/python-plain` | no database, pyright |
 | `python-plain-ty` | `fixtures/python-plain` | `typechecker: ty` |
 | `python-postgres-alembic` | `fixtures/python-postgres-alembic` | `postgres: "17"`, `.github/ci/env` and `setup.sh`, the Alembic checks |
+| `js-pnpm` | `fixtures/js-pnpm` | pnpm and Node from `packageManager` and `.node-version`; oxlint, `tsc -b`, vitest, `vite build` |
 
 The harness also holds the gate self-test, which checks `actions/gate` on
 success, skipped, failed and cancelled jobs. Everything ends in a job named

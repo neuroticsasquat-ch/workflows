@@ -1,0 +1,72 @@
+# CI for a pnpm-managed JS or TypeScript project: install from the lock, then
+# the four package scripts every JS repo defines: lint, typecheck, test and
+# build. What each one runs is the repo's business; this only runs them. The
+# inputs and the repo contract are in the README.
+name: js
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Where package.json, pnpm-lock.yaml and .node-version live.
+        type: string
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      # --- Install. A failure here skips every check. ------------------------
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # pnpm comes from package.json's packageManager field.
+      - uses: pnpm/action-setup@v6.1.1
+        with:
+          package_json_file: ${{ inputs.working-directory }}/package.json
+
+      # Node comes from .node-version. pnpm has to be on PATH first, for the
+      # pnpm cache.
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: ${{ inputs.working-directory }}/.node-version
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+
+      - name: package.json defines lint, typecheck, test and build
+        run: |
+          missing=$(jq -r '["lint", "typecheck", "test", "build"] - ((.scripts // {}) | keys) | join(", ")' package.json)
+          if [[ -n $missing ]]; then
+            echo "::error file=$(realpath --relative-to="$GITHUB_WORKSPACE" package.json),title=js::package.json has no script for: $missing. Every JS repo defines lint, typecheck, test and build."
+            exit 1
+          fi
+
+      - name: pnpm install --frozen-lockfile
+        id: install
+        run: pnpm install --frozen-lockfile
+
+      # --- Checks. Each runs once install succeeded, even after an earlier
+      # check failed; the job fails if any of them did.
+      - name: pnpm run lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm run lint
+
+      - name: pnpm run typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm run typecheck
+
+      - name: pnpm run test
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm run test
+
+      - name: pnpm run build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm run build

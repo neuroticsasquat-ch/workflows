@@ -1,0 +1,19 @@
+{
+  "name": "js-pnpm-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "lint": "oxlint --max-warnings 0",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "oxlint": "1.92.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
+  }
+}
