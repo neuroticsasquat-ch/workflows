@@ -177,7 +177,10 @@ jobs:
   # time and never cancelled (the workflow's tip check relies on that). Not in
   # `ci`'s needs: it runs after `ci`. The name shares image-docker's cache scope.
   publish:
-    if: github.event_name == 'push'
+    # Test ci's result itself. A bare condition gets an implicit success(),
+    # which is false when any job upstream of ci was skipped (gate-input-skipped
+    # always is), so publish would never run.
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.ci.result == 'success' }}
     needs: ci
     concurrency: { group: "publish-${{ github.ref }}", cancel-in-progress: false }
     permissions: { contents: read, packages: write }
